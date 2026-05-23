@@ -6,6 +6,7 @@ import time
 import random
 from datetime import datetime, timedelta
 from collections import defaultdict
+from aiogram.client.default import DefaultBotProperties
 from functools import wraps
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -337,7 +338,7 @@ flood: dict = defaultdict(list)
 # ══════════════════════════════════════════════
 #  BOT
 # ══════════════════════════════════════════════
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 
