@@ -2936,12 +2936,17 @@ async def cmd_raid(message: Message):
 #  LAUNCH
 # ══════════════════════════════════════════════
 async def main():
+    # Сбрасываем вебхук и удаляем очередь старых обновлений — убивает конфликт
+    await bot.delete_webhook(drop_pending_updates=True)
+    log.info("🔄 Webhook сброшен, старые обновления удалены")
+
     dp.include_router(router)
     log.info("🚀 Replify запущен")
     asyncio.create_task(update_member_counts())
     await dp.start_polling(
         bot,
-        allowed_updates=["message", "chat_member", "my_chat_member", "callback_query", "message_reaction"]
+        allowed_updates=["message", "chat_member", "my_chat_member", "callback_query", "message_reaction"],
+        drop_pending_updates=True
     )
 
 if __name__ == "__main__":
