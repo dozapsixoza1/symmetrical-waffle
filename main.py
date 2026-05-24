@@ -44,7 +44,14 @@ bot_data = load_data()
 BOT_TOKEN = "8701660855:AAFiYKKSngpNbkacMzSTjosC0fBS1KvmIG4"
 OWNER_ID = 8526401545
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 log = logging.getLogger("replify")
 
 # ══════════════════════════════════════════════
@@ -435,6 +442,7 @@ async def on_group_message(message: Message):
     uid = message.from_user.id
     cid = message.chat.id
     text = message.text or message.caption or ""
+    log.info(f"[GROUP] chat={cid} user={uid} text={text[:80]!r}")
 
     # stats
     db_exec("""
@@ -1999,7 +2007,7 @@ async def cb_help(call: CallbackQuery):
         "инвентарь • кейс • завод • топзавод\n"
         "жениться • семья • должности • чаты",
         reply_markup=kb_back()
-)
+    )
 
 # ══════════════════════════════════════════════
 #  REPORT SYSTEM
@@ -2254,9 +2262,8 @@ async def on_private_message(message: Message):
 #  UPDATE MEMBER COUNT
 # ══════════════════════════════════════════════
 async def update_member_counts():
-    """Обновляет кол-во участников каждые 10 минут"""
+    """Обновляет кол-во участников — сразу при старте и каждые 10 минут"""
     while True:
-        await asyncio.sleep(600)
         rows = db_all("SELECT chat_id FROM chats", ())
         for r in rows:
             try:
@@ -2264,6 +2271,7 @@ async def update_member_counts():
                 db_exec("UPDATE chats SET member_count=? WHERE chat_id=?", (count, r["chat_id"]))
             except:
                 pass
+        await asyncio.sleep(600)
 
 # ══════════════════════════════════════════════
 #  ADMIN WARNS (аварн)
