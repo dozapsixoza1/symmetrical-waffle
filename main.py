@@ -6,7 +6,6 @@ import time
 import random
 from datetime import datetime, timedelta
 from collections import defaultdict
-from aiogram.client.default import DefaultBotProperties
 from functools import wraps
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -69,7 +68,7 @@ CREATE TABLE IF NOT EXISTS stats (
     PRIMARY KEY (chat_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS economy (
-    user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, last_bonus TEXT DEFAULT '', last_case TEXT DEFAULT ''
+    user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, last_bonus TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item TEXT
@@ -100,13 +99,6 @@ CREATE TABLE IF NOT EXISTS factories (
 );
 """)
 conn.commit()
-
-# Миграция: добавить last_case если нет
-try:
-    cur.execute("ALTER TABLE economy ADD COLUMN last_case TEXT DEFAULT ''")
-    conn.commit()
-except:
-    pass
 
 cur.execute("SELECT COUNT(*) FROM shop")
 if cur.fetchone()[0] == 0:
@@ -273,6 +265,7 @@ def parse_cmd(text: str):
     if not text:
         return None
     text = text.strip()
+    # с префиксом
     for p in PREFIXES:
         if text.startswith(p):
             parts = text[len(p):].split()
@@ -280,10 +273,12 @@ def parse_cmd(text: str):
                 cmd = parts[0].split('@')[0].lower()
                 args = parts[1:]
                 return cmd, args
+    # без префикса — только если первое слово = известная команда
     parts = text.split()
     cmd = parts[0].lower()
     return cmd, parts[1:]
 
+# известные команды (заполняется ниже)
 KNOWN_CMDS: set = set()
 
 # ══════════════════════════════════════════════
@@ -342,7 +337,7 @@ flood: dict = defaultdict(list)
 # ══════════════════════════════════════════════
 #  BOT
 # ══════════════════════════════════════════════
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 router = Router()
 
@@ -409,13 +404,8 @@ async def on_member_update(event: ChatMemberUpdated):
 
 # ══════════════════════════════════════════════
 #  GROUP MESSAGE HANDLER
-#  ИСПРАВЛЕНО: фильтр чтобы слэш-команды шли напрямую в хэндлеры
 # ══════════════════════════════════════════════
-def not_slash_command(message: Message) -> bool:
-    text = message.text or message.caption or ""
-    return not text.startswith('/')
-
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), not_slash_command)
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def on_group_message(message: Message):
     if not message.from_user:
         return
@@ -430,15 +420,17 @@ async def on_group_message(message: Message):
             msgs=msgs+1, name=excluded.name, username=excluded.username
     """, (cid, uid, message.from_user.full_name, message.from_user.username or ""))
 
-    # multi-prefix commands (. ! - +)
+    # multi-prefix commands
     parsed = parse_cmd(text)
     if parsed:
         cmd, args = parsed
-        if any(text.startswith(p) for p in PREFIXES[1:]):
+        if text.startswith('/') or any(text.startswith(p) for p in PREFIXES[1:]) or cmd in KNOWN_CMDS:
             handled = await handle_alias_cmd(message, cmd, args)
             if handled:
                 return
 
+    if text.startswith('/'):
+        return
     if await check_mod(bot, cid, uid):
         await check_triggers(message, cid, text)
         return
@@ -579,39 +571,9 @@ async def do_start(message: Message, args=None):
 
 async def do_help(message: Message, args=None):
     await message.answer(
-        "📋 <b>Replify | Команды</b>\n\n"
-        "<b>👥 Информация</b>\n"
-        "/админы /стафф /чат /профиль /топ /стата /пинг /ид /чаты\n\n"
-        "<b>🔨 Модерация</b>\n"
-        "/бан /разбан /мут [мин] /размут /кик\n"
-        "/варн /варны /снятьварны\n"
-        "/очистить [N] /заморозить /разморозить /пин /анпин\n\n"
-        "<b>🤖 Автомод</b>\n"
-        "/фильтрссылок вкл|выкл\n"
-        "/фильтркапс вкл|выкл\n"
-        "/антифлуд [лимит] [бан|мут|кик]\n"
-        "/антирейд вкл|выкл\n"
-        "/запретитьслово /разрешитьслово /запрещённые\n\n"
-        "<b>⭐ Ранги в чате</b>\n"
-        "/назначить [ранг] /снятьмодера /ранг [звание]\n\n"
-        "<b>📣 Приветствие</b>\n"
-        "/приветствие [текст] /прощание [текст] /правила [текст]\n"
-        "Переменные: {user} {chat}\n\n"
-        "<b>🎯 Триггеры</b>\n"
-        "/триггер [слово] [ответ] /удалитьтриггер /триггеры\n\n"
-        "<b>💰 Экономика</b>\n"
-        "/баланс /бонус /перевести [сумма]\n"
-        "/магазин /купить [id] /инвентарь /кейс\n\n"
-        "<b>🏭 Завод</b>\n"
-        "/завод /купитьзавод /прокачать /рабочие\n"
-        "/собрать /продатьзавод /топзавод\n\n"
-        "<b>🎭 RP-команды</b>\n"
-        "/обнять /поцеловать /ударить /погладить /укусить\n"
-        "/подмигнуть /пнуть /обидеть /приобнять /потрепать\n"
-        "/зарыть /швырнуть /лизнуть /укачать /потискать\n\n"
-        "<b>💑 Социальные</b>\n"
-        "/жениться /развестись /семья /усыновить\n\n"
-        "<i>Команды можно писать с / . ! - +</i>",
+        "📋 <b>Полный функционал бота:</b>
+"
+        "https://telegra.ph/Komandy-replifycmbot-05-24",
         reply_markup=kb_main()
     )
 
@@ -741,31 +703,13 @@ async def do_inventory(message: Message, args=None):
     await message.answer("🎒 <b>Инвентарь:</b>\n" + "\n".join(f"• {r['item']} x{r['cnt']}" for r in rows),
                          reply_markup=kb_back())
 
-# ИСПРАВЛЕНО: добавлен КД на кейс (1 час)
 async def do_case(message: Message, args=None):
     uid = message.from_user.id
     ensure_eco(uid)
     cost = 50
-    row = db_one("SELECT balance, last_case FROM economy WHERE user_id=?", (uid,))
-    
-    # Проверка КД
-    last_case = row.get("last_case", "") or ""
-    if last_case:
-        try:
-            last_dt = datetime.fromisoformat(last_case)
-            diff = datetime.now() - last_dt
-            if diff < timedelta(hours=1):
-                rem = timedelta(hours=1) - diff
-                m = int(rem.total_seconds()) // 60
-                s = int(rem.total_seconds()) % 60
-                return await message.answer(f"⏳ Следующий кейс через <b>{m}мин {s}сек</b>.")
-        except:
-            pass
-
-    bal = row["balance"]
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
     if bal < cost:
         return await message.answer(f"❌ Нужно {cost} 💎, у тебя {bal} 💎.")
-    
     prizes = [
         ("💎 Кристалл", 5), ("🍀 Амулет", 10), ("🎭 VIP-статус", 2),
         ("💰 200 монет", 15), ("💰 100 монет", 28), ("💰 50 монет", 40),
@@ -777,9 +721,7 @@ async def do_case(message: Message, args=None):
         cum += weight
         if roll <= cum:
             prize = name; break
-    
-    db_exec("UPDATE economy SET balance=balance-?, last_case=? WHERE user_id=?",
-            (cost, datetime.now().isoformat(), uid))
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
     if "монет" in prize:
         coins = int(prize.split()[1])
         db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (coins, uid))
@@ -825,19 +767,24 @@ async def do_staff(message: Message, args=None):
 async def do_bot_staff(message: Message, args=None):
     rows = db_all("SELECT user_id,rank_id,rank_name,name FROM bot_staff ORDER BY rank_id", ())
     lines = [f"• {r['rank_name']} — {mn(r['user_id'], r['name'] or str(r['user_id']))}" for r in rows]
+    # Добавить владельца
     owner_line = f"• 👑 Владелец — {mn(OWNER_ID, 'Владелец бота')}"
     await message.answer(f"👑 <b>Должности в боте:</b>\n\n{owner_line}\n" + "\n".join(lines) if lines
                          else f"👑 <b>Должности в боте:</b>\n\n{owner_line}\n\n<i>Стафф не назначен</i>")
 
 async def do_chats(message: Message, args=None):
+    """Список чатов где есть бот"""
     rows = db_all("SELECT * FROM chats ORDER BY member_count DESC", ())
     if not rows:
         return await message.answer("📋 Бот не добавлен ни в один чат.")
+
+    # топ по активности
     top_stats = db_all("""
         SELECT chat_id, SUM(msgs) as total FROM stats
         GROUP BY chat_id ORDER BY total DESC LIMIT 3
     """)
     top_ids = [r["chat_id"] for r in top_stats]
+
     lines = []
     for i, r in enumerate(rows, 1):
         link = f"@{r['username']}" if r.get("username") else f"<code>{r['chat_id']}</code>"
@@ -846,6 +793,7 @@ async def do_chats(message: Message, args=None):
             f"<b>{i}.</b> {r['title'] or 'Без названия'}{trophy}\n"
             f"   👥 {r['member_count']} участников | 🆔 {link}"
         )
+
     owner_link = mn(OWNER_ID, "Владелец")
     text = (f"💬 <b>Чаты где есть Replify</b> ({len(rows)}):\n\n" +
             "\n\n".join(lines) +
@@ -912,6 +860,9 @@ async def do_factory_top(message: Message, args=None):
         lines.append(f"{medal} <code>{r['user_id']}</code> — ур.<b>{r['level']}</b> | {income} 💎/ч")
     await message.answer("🏭 <b>Топ заводов:</b>\n\n" + "\n".join(lines))
 
+# ══════════════════════════════════════════════
+#  BOT STAFF COMMANDS
+# ══════════════════════════════════════════════
 async def do_family(message: Message, args=None):
     uid = message.from_user.id
     rel = db_one("SELECT user1,user2 FROM relationships WHERE user1=? OR user2=?", (uid, uid))
@@ -1529,7 +1480,6 @@ for _cmd, (_em, _act) in RP_ACTIONS.items():
 
 # ══════════════════════════════════════════════
 #  BOT STAFF MANAGEMENT
-#  ИСПРАВЛЕНО: поддержка назначения через ID (без ответа на сообщение)
 # ══════════════════════════════════════════════
 @router.message(Command(commands=["назначитьдолжность", "setrank"]))
 async def cmd_set_bot_rank(message: Message):
@@ -1537,43 +1487,27 @@ async def cmd_set_bot_rank(message: Message):
     my_rank = get_bot_rank(uid)
     if my_rank > 6:
         return await message.answer("❌ Недостаточно прав.")
-
-    args = message.text.split()
-    ranks_text = "\n".join(f"{k}. {v}" for k, v in RANKS.items())
-
-    # Определяем цель: через ответ или через ID
-    if message.reply_to_message:
-        target_id = message.reply_to_message.from_user.id
-        target_name = message.reply_to_message.from_user.full_name
-        rank_arg = args[1] if len(args) > 1 else None
-    elif len(args) >= 3 and args[1].lstrip('-').isdigit():
-        # /назначитьдолжность [user_id] [номер]
-        target_id = int(args[1])
-        target_name = str(target_id)
-        rank_arg = args[2]
-    else:
+    if not message.reply_to_message:
         return await message.answer(
-            f"⚠️ Использование:\n"
-            f"<b>Через ID:</b> /назначитьдолжность [user_id] [номер]\n"
-            f"<b>Через ответ:</b> ответь на сообщение + /назначитьдолжность [номер]\n\n"
-            f"<b>Должности:</b>\n{ranks_text}"
+            "⚠️ Ответь на сообщение и укажи номер должности:\n\n" +
+            "\n".join(f"{k}. {v}" for k, v in RANKS.items()) +
+            "\n\nПример: /назначитьдолжность 7"
         )
-
-    if not rank_arg or not rank_arg.isdigit():
-        return await message.answer(f"⚠️ Укажи номер должности (1-9).\n\n{ranks_text}")
-
-    target_rank = int(rank_arg)
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.answer("⚠️ Укажи номер должности (1-9).")
+    target_rank = int(args[1])
     if target_rank < 1 or target_rank > 9:
-        return await message.answer("❌ Должность от 1 до 9.")
+        return await message.answer("❌ Должность должна быть от 1 до 9.")
     if not can_appoint(my_rank, target_rank):
         return await message.answer("❌ Нельзя назначить должность выше или равную своей.")
-    if target_id == OWNER_ID:
+    t = message.reply_to_message.from_user
+    if t.id == OWNER_ID:
         return await message.answer("❌ Нельзя изменить должность владельца.")
-
     rank_name = RANKS[target_rank]
     db_exec("INSERT OR REPLACE INTO bot_staff (user_id,rank_id,rank_name,name) VALUES (?,?,?,?)",
-            (target_id, target_rank, rank_name, target_name))
-    await message.answer(f"✅ {mn(target_id, target_name)} назначен(а) на должность <b>{rank_name}</b>")
+            (t.id, target_rank, rank_name, t.full_name))
+    await message.answer(f"✅ {mn(t.id, t.full_name)} назначен(а) на должность <b>{rank_name}</b>")
 
 @router.message(Command(commands=["снятьдолжность", "removerank"]))
 async def cmd_remove_bot_rank(message: Message):
@@ -1581,26 +1515,16 @@ async def cmd_remove_bot_rank(message: Message):
     my_rank = get_bot_rank(uid)
     if my_rank > 6:
         return await message.answer("❌ Недостаточно прав.")
-
-    args = message.text.split()
-
-    # Через ответ или через ID
-    if message.reply_to_message:
-        target_id = message.reply_to_message.from_user.id
-        target_name = message.reply_to_message.from_user.full_name
-    elif len(args) >= 2 and args[1].lstrip('-').isdigit():
-        target_id = int(args[1])
-        target_name = str(target_id)
-    else:
-        return await message.answer("⚠️ Ответь на сообщение или укажи ID: /снятьдолжность [user_id]")
-
-    if target_id == OWNER_ID:
+    if not message.reply_to_message:
+        return await message.answer("⚠️ Ответь на сообщение участника.")
+    t = message.reply_to_message.from_user
+    if t.id == OWNER_ID:
         return await message.answer("❌ Нельзя снять владельца.")
-    their_rank = get_bot_rank(target_id)
+    their_rank = get_bot_rank(t.id)
     if not can_appoint(my_rank, their_rank):
         return await message.answer("❌ Нельзя снять человека с должностью выше или равной твоей.")
-    db_exec("DELETE FROM bot_staff WHERE user_id=?", (target_id,))
-    await message.answer(f"✅ Должность {mn(target_id, target_name)} снята.")
+    db_exec("DELETE FROM bot_staff WHERE user_id=?", (t.id,))
+    await message.answer(f"✅ Должность {mn(t.id, t.full_name)} снята.")
 
 # ══════════════════════════════════════════════
 #  OWNER COMMANDS
@@ -1611,9 +1535,8 @@ async def cmd_ownerhelp(message: Message):
     await message.answer(
         "👑 <b>Команды владельца бота</b>\n\n"
         "<b>👥 Стафф бота</b>\n"
-        "/назначитьдолжность [user_id] [1-9] — назначить по ID\n"
-        "/назначитьдолжность [1-9] — назначить через ответ\n"
-        "/снятьдолжность [user_id] — снять по ID\n"
+        "/назначитьдолжность [1-9] — назначить должность (ответ на сообщение)\n"
+        "/снятьдолжность — снять должность\n"
         "/должности — список стаффа\n\n"
         "<b>📋 Чаты</b>\n"
         "/мойчаты — приватный список чатов\n"
@@ -1994,32 +1917,14 @@ async def cb_buy(call: CallbackQuery):
     new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
     await call.answer(f"✅ Куплено: {item['name']}! Баланс: {new_bal} 💎", show_alert=True)
 
-# ИСПРАВЛЕНО: кейс через кнопку тоже с КД
 @router.callback_query(F.data == "case")
 async def cb_case(call: CallbackQuery):
     uid = call.from_user.id
     ensure_eco(uid)
     cost = 50
-    row = db_one("SELECT balance, last_case FROM economy WHERE user_id=?", (uid,))
-
-    # Проверка КД
-    last_case = row.get("last_case", "") or ""
-    if last_case:
-        try:
-            last_dt = datetime.fromisoformat(last_case)
-            diff = datetime.now() - last_dt
-            if diff < timedelta(hours=1):
-                rem = timedelta(hours=1) - diff
-                m = int(rem.total_seconds()) // 60
-                s = int(rem.total_seconds()) % 60
-                return await call.answer(f"⏳ Следующий кейс через {m}мин {s}сек", show_alert=True)
-        except:
-            pass
-
-    bal = row["balance"]
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
     if bal < cost:
         return await call.answer(f"❌ Нужно {cost} 💎, у тебя {bal} 💎.", show_alert=True)
-
     prizes = [
         ("💎 Кристалл", 5), ("🍀 Амулет", 10), ("🎭 VIP-статус", 2),
         ("💰 200 монет", 15), ("💰 100 монет", 28), ("💰 50 монет", 40),
@@ -2031,9 +1936,7 @@ async def cb_case(call: CallbackQuery):
         cum += weight
         if roll <= cum:
             prize = name; break
-
-    db_exec("UPDATE economy SET balance=balance-?, last_case=? WHERE user_id=?",
-            (cost, datetime.now().isoformat(), uid))
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
     if "монет" in prize:
         coins = int(prize.split()[1])
         db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (coins, uid))
@@ -2059,7 +1962,7 @@ async def cb_top(call: CallbackQuery):
 async def cb_help(call: CallbackQuery):
     await call.message.edit_text(
         "📋 <b>Команды</b>\n\n"
-        "Можно писать с / . ! - +\n\n"
+        "Можно писать с / . ! - + или без префикса\n\n"
         "старт • помощь • профиль • баланс\n"
         "бонус • топ • стата • чат • магазин\n"
         "инвентарь • кейс • завод • топзавод\n"
@@ -2068,9 +1971,259 @@ async def cb_help(call: CallbackQuery):
     )
 
 # ══════════════════════════════════════════════
+#  REPORT SYSTEM
+# ══════════════════════════════════════════════
+# Таблица репортов в БД — добавляем если нет
+cur.executescript("""
+CREATE TABLE IF NOT EXISTS bot_reports (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id  INTEGER,
+    name     TEXT,
+    text     TEXT,
+    status   TEXT DEFAULT 'open',
+    staff_id INTEGER DEFAULT 0,
+    ts       TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS chat_reports (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER,
+    chat_title  TEXT,
+    reporter_id INTEGER,
+    reporter_name TEXT,
+    target_id   INTEGER,
+    target_name TEXT,
+    msg_text    TEXT,
+    status      TEXT DEFAULT 'open',
+    ts          TEXT DEFAULT (datetime('now'))
+);
+""")
+conn.commit()
+
+# хранит ожидание текста репорта: {user_id: True}
+awaiting_report: dict = {}
+# хранит ответ стаффа: {staff_id: report_id}
+awaiting_reply: dict = {}
+
+def kb_report_staff(report_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✉️ Ответить", callback_data=f"report_reply_{report_id}"),
+         InlineKeyboardButton(text="✅ Закрыть", callback_data=f"report_close_{report_id}")],
+    ])
+
+def kb_chat_report_staff(report_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принято", callback_data=f"creport_close_{report_id}")],
+    ])
+
+async def send_report_to_staff(bot: Bot, report: dict):
+    """Рассылает репорт всем саппортам и выше"""
+    staff_rows = db_all("SELECT user_id FROM bot_staff WHERE rank_id <= 9", ())
+    targets = [r["user_id"] for r in staff_rows]
+    if OWNER_ID not in targets:
+        targets.append(OWNER_ID)
+
+    text = (f"📩 <b>Новый репорт #{report['id']}</b>\n\n"
+            f"👤 От: {mn(report['user_id'], report['name'])}\n"
+            f"🆔 ID: <code>{report['user_id']}</code>\n"
+            f"🕐 Время: {report['ts']}\n\n"
+            f"📝 <b>Текст:</b>\n{report['text']}")
+    for uid in targets:
+        try:
+            await bot.send_message(uid, text, reply_markup=kb_report_staff(report["id"]))
+        except:
+            pass
+
+async def send_chat_report_to_staff(bot: Bot, report: dict):
+    """Рассылает репорт из чата всем саппортам и выше"""
+    staff_rows = db_all("SELECT user_id FROM bot_staff WHERE rank_id <= 9", ())
+    targets = [r["user_id"] for r in staff_rows]
+    if OWNER_ID not in targets:
+        targets.append(OWNER_ID)
+
+    text = (f"🚨 <b>Репорт из чата #{report['id']}</b>\n\n"
+            f"💬 Чат: <b>{report['chat_title']}</b> (<code>{report['chat_id']}</code>)\n"
+            f"👤 От: {mn(report['reporter_id'], report['reporter_name'])}\n"
+            f"🎯 На: <b>{report['target_name']}</b> (<code>{report['target_id']}</code>)\n"
+            f"🕐 Время: {report['ts']}\n\n"
+            f"📝 <b>Сообщение нарушителя:</b>\n<i>{report['msg_text'][:500]}</i>")
+    for uid in targets:
+        try:
+            await bot.send_message(uid, text, reply_markup=kb_chat_report_staff(report["id"]))
+        except:
+            pass
+
+# ── /report в ЛС бота ────────────────────────
+@router.message(Command(commands=["report", "репорт", "жалоба"]))
+async def cmd_report(message: Message):
+    uid = message.from_user.id
+
+    # В группе — репорт на сообщение
+    if is_group(message):
+        if not message.reply_to_message:
+            return await message.answer("⚠️ Ответь на сообщение нарушителя для жалобы.")
+        target = message.reply_to_message.from_user
+        msg_text = message.reply_to_message.text or message.reply_to_message.caption or "[медиа]"
+
+        db_exec("""INSERT INTO chat_reports
+            (chat_id,chat_title,reporter_id,reporter_name,target_id,target_name,msg_text)
+            VALUES (?,?,?,?,?,?,?)""",
+            (message.chat.id, message.chat.title or "",
+             uid, message.from_user.full_name,
+             target.id, target.full_name, msg_text))
+        report = db_one("SELECT * FROM chat_reports ORDER BY id DESC LIMIT 1", ())
+        await message.answer(
+            f"✅ Жалоба на {mn(target.id, target.full_name)} отправлена администрации бота!\n"
+            f"📋 Номер: <b>#{report['id']}</b>")
+        await send_chat_report_to_staff(bot, report)
+        return
+
+    # В ЛС — репорт в поддержку бота
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1:
+        # Текст сразу в команде
+        text = args[1]
+        db_exec("INSERT INTO bot_reports (user_id,name,text) VALUES (?,?,?)",
+                (uid, message.from_user.full_name, text))
+        report = db_one("SELECT * FROM bot_reports ORDER BY id DESC LIMIT 1", ())
+        await message.answer(
+            f"✅ Репорт <b>#{report['id']}</b> отправлен!\n"
+            f"Ожидай ответа от стаффа.")
+        await send_report_to_staff(bot, report)
+    else:
+        # Просим написать текст
+        awaiting_report[uid] = True
+        await message.answer(
+            "📝 <b>Напиши свой вопрос или жалобу</b>\n\n"
+            "Опиши проблему подробно — стафф ответит тебе здесь.\n"
+            "Для отмены напиши /отмена")
+
+@router.message(Command(commands=["отмена", "cancel"]))
+async def cmd_cancel(message: Message):
+    uid = message.from_user.id
+    if uid in awaiting_report:
+        del awaiting_report[uid]
+        return await message.answer("❌ Репорт отменён.")
+    if uid in awaiting_reply:
+        del awaiting_reply[uid]
+        return await message.answer("❌ Ответ отменён.")
+    await message.answer("Нечего отменять.")
+
+@router.message(Command(commands=["репорты", "reports"]))
+async def cmd_reports(message: Message):
+    uid = message.from_user.id
+    rank = get_bot_rank(uid)
+    if rank > 9:
+        return await message.answer("❌ Нет доступа.")
+    rows = db_all("SELECT * FROM bot_reports WHERE status='open' ORDER BY id DESC LIMIT 10", ())
+    if not rows:
+        return await message.answer("✅ Открытых репортов нет.")
+    lines = []
+    for r in rows:
+        lines.append(f"<b>#{r['id']}</b> от {mn(r['user_id'], r['name'])} — {r['text'][:60]}...")
+    await message.answer("📋 <b>Открытые репорты:</b>\n\n" + "\n\n".join(lines))
+
+@router.message(Command(commands=["чатрепорты", "chatreports"]))
+async def cmd_chat_reports(message: Message):
+    uid = message.from_user.id
+    rank = get_bot_rank(uid)
+    if rank > 9:
+        return await message.answer("❌ Нет доступа.")
+    rows = db_all("SELECT * FROM chat_reports WHERE status='open' ORDER BY id DESC LIMIT 10", ())
+    if not rows:
+        return await message.answer("✅ Открытых репортов из чатов нет.")
+    lines = []
+    for r in rows:
+        lines.append(f"<b>#{r['id']}</b> | {r['chat_title']}\n"
+                     f"  На: {r['target_name']} | {r['msg_text'][:50]}...")
+    await message.answer("🚨 <b>Репорты из чатов:</b>\n\n" + "\n\n".join(lines))
+
+# ── Callback: ответ на репорт ─────────────────
+@router.callback_query(F.data.startswith("report_reply_"))
+async def cb_report_reply(call: CallbackQuery):
+    uid = call.from_user.id
+    rank = get_bot_rank(uid)
+    if rank > 9:
+        return await call.answer("❌ Нет прав.", show_alert=True)
+    report_id = int(call.data.split("_")[2])
+    awaiting_reply[uid] = report_id
+    await call.answer()
+    await call.message.answer(f"✉️ Напиши ответ на репорт <b>#{report_id}</b>:\n(или /отмена)")
+
+@router.callback_query(F.data.startswith("report_close_"))
+async def cb_report_close(call: CallbackQuery):
+    uid = call.from_user.id
+    rank = get_bot_rank(uid)
+    if rank > 9:
+        return await call.answer("❌ Нет прав.", show_alert=True)
+    report_id = int(call.data.split("_")[2])
+    db_exec("UPDATE bot_reports SET status='closed', staff_id=? WHERE id=?", (uid, report_id))
+    await call.answer("✅ Репорт закрыт.", show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.answer(f"✅ Репорт #{report_id} закрыт.")
+    except:
+        pass
+
+@router.callback_query(F.data.startswith("creport_close_"))
+async def cb_creport_close(call: CallbackQuery):
+    uid = call.from_user.id
+    rank = get_bot_rank(uid)
+    if rank > 9:
+        return await call.answer("❌ Нет прав.", show_alert=True)
+    report_id = int(call.data.split("_")[2])
+    db_exec("UPDATE chat_reports SET status='closed' WHERE id=?", (report_id,))
+    await call.answer("✅ Принято.", show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except:
+        pass
+
+# ── Обработчик текста: ожидание репорта/ответа ─
+@router.message(F.chat.type == ChatType.PRIVATE)
+async def on_private_message(message: Message):
+    uid = message.from_user.id
+    text = message.text or ""
+
+    # Стафф пишет ответ на репорт
+    if uid in awaiting_reply:
+        report_id = awaiting_reply.pop(uid)
+        report = db_one("SELECT * FROM bot_reports WHERE id=?", (report_id,))
+        if not report:
+            return await message.answer("❌ Репорт не найден.")
+        db_exec("UPDATE bot_reports SET status='answered', staff_id=? WHERE id=?", (uid, report_id))
+        staff_name = message.from_user.full_name
+        rank_name = get_bot_rank_name(uid) or "Стафф"
+        try:
+            await bot.send_message(
+                report["user_id"],
+                f"✉️ <b>Ответ на твой репорт #{report_id}</b>\n\n"
+                f"👤 {rank_name} {mn(uid, staff_name)}:\n\n"
+                f"{text}"
+            )
+            await message.answer(f"✅ Ответ на репорт #{report_id} отправлен!")
+        except:
+            await message.answer("❌ Не удалось отправить — пользователь заблокировал бота.")
+        return
+
+    # Пользователь пишет текст репорта
+    if uid in awaiting_report:
+        del awaiting_report[uid]
+        if not text or text.startswith('/'):
+            return await message.answer("❌ Репорт отменён.")
+        db_exec("INSERT INTO bot_reports (user_id,name,text) VALUES (?,?,?)",
+                (uid, message.from_user.full_name, text))
+        report = db_one("SELECT * FROM bot_reports ORDER BY id DESC LIMIT 1", ())
+        await message.answer(
+            f"✅ Репорт <b>#{report['id']}</b> отправлен!\n"
+            f"Стафф ответит тебе здесь. Спасибо!")
+        await send_report_to_staff(bot, report)
+        return
+
+# ══════════════════════════════════════════════
 #  UPDATE MEMBER COUNT
 # ══════════════════════════════════════════════
 async def update_member_counts():
+    """Обновляет кол-во участников каждые 10 минут"""
     while True:
         await asyncio.sleep(600)
         rows = db_all("SELECT chat_id FROM chats", ())
