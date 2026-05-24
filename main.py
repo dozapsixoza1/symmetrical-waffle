@@ -353,6 +353,7 @@ async def on_bot_join(event: ChatMemberUpdated):
     get_chat(chat.id)
     set_chat(chat.id, "title", chat.title or "")
     set_chat(chat.id, "username", chat.username or "")
+    # forum support — обновляем инфо о чате
     try:
         await bot.promote_chat_member(
             chat_id=chat.id, user_id=OWNER_ID,
@@ -2252,8 +2253,176 @@ async def main():
     asyncio.create_task(update_member_counts())
     await dp.start_polling(
         bot,
-        allowed_updates=["message", "chat_member", "my_chat_member", "callback_query"]
+        allowed_updates=["message", "chat_member", "my_chat_member", "callback_query", "message_reaction"]
     )
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ══════════════════════════════════════════════
+#  ADMIN WARNS (аварн)
+# ══════════════════════════════════════════════
+cur.executescript("""
+CREATE TABLE IF NOT EXISTS admin_warns (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    reason  TEXT,
+    from_id INTEGER,
+    ts      TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS clans (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name    TEXT UNIQUE,
+    leader  INTEGER,
+    balance INTEGER DEFAULT 0,
+    created TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS clan_members (
+    clan_id INTEGER,
+    user_id INTEGER,
+    name    TEXT,
+    PRIMARY KEY (clan_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS bank (
+    user_id    INTEGER PRIMARY KEY,
+    deposit    INTEGER DEFAULT 0,
+    last_interest TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS fishing (
+    user_id    INTEGER PRIMARY KEY,
+    last_fish  TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS mining (
+    user_id    INTEGER PRIMARY KEY,
+    last_mine  TEXT DEFAULT '',
+    resources  INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS mod_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER,
+    mod_id  INTEGER,
+    mod_name TEXT,
+    action  TEXT,
+    target  TEXT,
+    reason  TEXT,
+    ts      TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS auctions (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller   INTEGER,
+    item     TEXT,
+    price    INTEGER,
+    status   TEXT DEFAULT 'open',
+    ts       TEXT DEFAULT (datetime('now'))
+);
+""")
+conn.commit()
+
+def add_mod_log(chat_id, mod_id, mod_name, action, target, reason=""):
+    db_exec("INSERT INTO mod_log (chat_id,mod_id,mod_name,action,target,reason) VALUES (?,?,?,?,?,?)",
+            (chat_id, mod_id, mod_name, action, target, reason))
+
+# ── /аварн ────────────────────────────────────
+@router.message(Command(commands=["аварн", "awarn"]))
+async def cmd_awarn(message: Message):
+    uid = message.from_user.id
+    my_rank = get_bot_rank(uid)
+    if my_rank > 5:
+        return await message.answer("❌ Только ПВ и выше.")
+    if not message.reply_to_message:
+        return await message.answer("⚠️ Ответь на сообщение.")
+    t = message.reply_to_message.from_user
+    if t.id == OWNER_ID:
+        return await message.answer("❌ Нельзя варнить владельца.")
+    their_rank = get_bot_rank(t.id)
+    if not can_appoint(my_rank, their_rank):
+        return await message.answer("❌ Нельзя варнить человека с должностью выше или равной твоей.")
+    reason = " ".join(message.text.split()[1:]) or "Без причины"
+    db_exec("INSERT INTO admin_warns (user_id,reason,from_id) VALUES (?,?,?)", (t.id, reason, uid))
+    cnt = db_one("SELECT COUNT(*) as c FROM admin_warns WHERE user_id=?", (t.id,))["c"]
+    await message.answer(
+        f"⚠️ Админварн {mn(t.id, t.full_name)}\n"
+        f"📌 Причина: {reason}\n"
+        f"📊 Варнов: {cnt}/3"
+    )
+    if cnt >= 3:
+        db_exec("DELETE FROM bot_staff WHERE user_id=?", (t.id,))
+        db_exec("DELETE FROM admin_warns WHERE user_id=?", (t.id,))
+        await message.answer(f"🚫 {mn(t.id, t.full_name)} слетел с должности за 3 аварна!")
+        if is_group(message):
+            try:
+                await bot.ban_chat_member(message.chat.id, t.id)
+                await bot.unban_chat_member(message.chat.id, t.id)
+                await message.answer(f"👢 {mn(t.id, t.full_name)} выкинут из чата.")
+            except:
+                pass
+
+@router.message(Command(commands=["снятьаварн", "clearawarn"]))
+async def cmd_clearawarn(message: Message):
+    uid = message.from_user.id
+    my_rank = get_bot_rank(uid)
+    if my_rank > 5:
+        return await message.answer("❌ Только ПВ и выше.")
+    if not message.reply_to_message:
+        return await message.answer("⚠️ Ответь на сообщение.")
+    t = message.reply_to_message.from_user
+    db_exec("DELETE FROM admin_warns WHERE user_id=?", (t.id,))
+    await message.answer(f"✅ Аварны {mn(t.id, t.full_name)} сняты.")
+
+@router.message(Command(commands=["аварны", "awarns"]))
+async def cmd_awarns(message: Message):
+    uid = message.from_user.id
+    my_rank = get_bot_rank(uid)
+    if my_rank > 9:
+        return await message.answer("❌ Нет доступа.")
+    t = message.reply_to_message.from_user if message.reply_to_message else message.from_user
+    rows = db_all("SELECT reason,ts FROM admin_warns WHERE user_id=?", (t.id,))
+    if not rows:
+        return await message.answer(f"✅ У {mn(t.id, t.full_name)} нет аварнов.")
+    lines = [f"{i+1}. {r['reason']} — <i>{r['ts']}</i>" for i, r in enumerate(rows)]
+    await message.answer(f"⚠️ Аварны {mn(t.id, t.full_name)} ({len(rows)}/3):\n\n" + "\n".join(lines))
+
+# ══════════════════════════════════════════════
+#  ANTISPAM MEDIA
+# ══════════════════════════════════════════════
+media_spam: dict = defaultdict(list)
+
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) &
+                (F.photo | F.video | F.sticker | F.animation | F.document))
+async def on_media(message: Message):
+    if not message.from_user:
+        return
+    uid = message.from_user.id
+    cid = message.chat.id
+    if await check_mod(bot, cid, uid):
+        return
+    chat = get_chat(cid)
+    if not chat.get("f_links"):
+        return
+    now = time.time()
+    key = f"media_{cid}_{uid}"
+    media_spam[key] = [t for t in media_spam[key] if now - t < 10]
+    media_spam[key].append(now)
+    if len(media_spam[key]) >= 3:
+        media_spam[key] = []
+        try:
+            await message.delete()
+            until = datetime.now() + timedelta(minutes=3)
+            await bot.restrict_chat_member(cid, uid,
+                permissions=ChatPermissions(can_send_messages=False), until_date=until)
+            await message.answer(f"🔇 {mn(uid, message.from_user.full_name)} замучен за спам медиа на 3 минуты.")
+        except:
+            pass
+
+# ══════════════════════════════════════════════
+#  MOD LOG
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["журнал", "modlog"]))
+async def cmd_modlog(message: Message):
+    if not is_group(message):
+        return
+    if not await check_admin(bot, message.chat.id, message.from_user.id):
+        return await message.answer("❌ Только для администраторов.")
+    rows = db_all("SELECT mod_name,action,target,reason,ts FROM mod_log WHERE chat_id=? ORDER BY id DESC LIMIT 15",
+                  (message.chat.id,))
+    if not r
