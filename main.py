@@ -17,6 +17,27 @@ from aiogram.types import (
 from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.enums import ChatMemberStatus, ChatType
 
+import json
+
+# Функция для загрузки данных при старте бота
+def load_data():
+    try:
+        # Пытаемся открыть файл с данными
+        with open("database.json", "r", encoding="utf-8") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        # Если файла еще нет (первый запуск), возвращаем пустоту
+        return {} 
+
+# Функция для сохранения данных
+def save_data(data):
+    # Записываем все изменения в файл
+    with open("database.json", "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=4)
+
+# Твоя главная переменная, где хранятся все балансы и кланы
+bot_data = load_data()
+
 # ══════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════
