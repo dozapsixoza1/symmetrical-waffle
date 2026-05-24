@@ -571,12 +571,9 @@ async def do_start(message: Message, args=None):
 
 async def do_help(message: Message, args=None):
     await message.answer(
-        "📋 <b>Полный функционал бота:</b>
-"
-        "https://telegra.ph/Komandy-replifycmbot-05-24",
+        "📋 <b>Полный функционал бота:</b>\nhttps://telegra.ph/Komandy-replifycmbot-05-24",
         reply_markup=kb_main()
     )
-
 async def do_ping(message: Message, args=None):
     await message.answer("🟢 Replify работает!")
 
