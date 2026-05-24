@@ -2425,4 +2425,4 @@ async def cmd_modlog(message: Message):
         return await message.answer("❌ Только для администраторов.")
     rows = db_all("SELECT mod_name,action,target,reason,ts FROM mod_log WHERE chat_id=? ORDER BY id DESC LIMIT 15",
                   (message.chat.id,))
-    if not r
+    if not r:
