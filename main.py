@@ -586,6 +586,7 @@ async def handle_alias_cmd(message: Message, cmd: str, args: list) -> bool:
 #  CALLABLE HANDLERS (for alias system)
 # ══════════════════════════════════════════════
 async def do_start(message: Message, args=None):
+    log.info(f"[DO_START] начало, chat={message.chat.id}, type={message.chat.type}")
     uid = message.from_user.id
     rank_name = get_bot_rank_name(uid)
     rank_line = f"\n🎖 Твоя должность: <b>{rank_name}</b>" if rank_name else ""
@@ -599,7 +600,12 @@ async def do_start(message: Message, args=None):
         f"🎭 RP-команды и развлечения\n\n"
         f"Используй кнопки ниже или /помощь"
     )
-    await message.answer(text, reply_markup=kb_main())
+    log.info(f"[DO_START] отправляю ответ...")
+    try:
+        await message.answer(text, reply_markup=kb_main())
+        log.info(f"[DO_START] ответ отправлен!")
+    except Exception as e:
+        log.error(f"[DO_START] ОШИБКА ОТПРАВКИ: {e}")
 
 async def do_help(message: Message, args=None):
     await message.answer(
@@ -911,7 +917,12 @@ async def do_family(message: Message, args=None):
 # ══════════════════════════════════════════════
 @router.message(Command(commands=["start", "старт"]))
 async def cmd_start(message: Message):
-    await do_start(message)
+    log.info(f"[CMD_START] chat={message.chat.id} user={message.from_user.id} type={message.chat.type}")
+    try:
+        await do_start(message)
+        log.info(f"[CMD_START] ответ отправлен успешно")
+    except Exception as e:
+        log.error(f"[CMD_START] ОШИБКА: {e}")
 
 @router.message(Command(commands=["help", "помощь", "команды"]))
 async def cmd_help(message: Message):
