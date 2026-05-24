@@ -2944,3 +2944,8 @@ async def cmd_raid(message: Message):
     else:
         t = message.reply_to_message.from_user
         await message.answer(f"❌ Ограбление провалилось! Охрана завода {mn(victim, t.full_name)} отбила атаку.")
+print("==========================================")
+    print("Бот готов к работе!")
+    print(f"Токен: {BOT_TOKEN[:10]}... (проверь, что это верный токен)")
+    print("Жду сообщений в ЛС или в чатах...")
+    print("==========================================")
