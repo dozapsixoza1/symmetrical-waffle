@@ -9,6 +9,7 @@ from collections import defaultdict
 from functools import wraps
 
 from aiogram import Bot, Dispatcher, Router, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
     Message, ChatMemberUpdated, ChatPermissions,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -337,7 +338,7 @@ flood: dict = defaultdict(list)
 # ══════════════════════════════════════════════
 #  BOT
 # ══════════════════════════════════════════════
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 
