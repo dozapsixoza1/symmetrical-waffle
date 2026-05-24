@@ -20,8 +20,8 @@ from aiogram.enums import ChatMemberStatus, ChatType
 # ══════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════
-BOT_TOKEN = "8701660855:AAFiYKKSngpNbkacMzSTjosC0fBS1KvmIG4"
-OWNER_ID = 8526401545
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+OWNER_ID = 8675927241
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("replify")
@@ -2425,4 +2425,495 @@ async def cmd_modlog(message: Message):
         return await message.answer("❌ Только для администраторов.")
     rows = db_all("SELECT mod_name,action,target,reason,ts FROM mod_log WHERE chat_id=? ORDER BY id DESC LIMIT 15",
                   (message.chat.id,))
-    if not r:
+    if not rows:
+        return await message.answer("📋 Журнал пуст.")
+    lines = [f"<b>{r['action']}</b> → {r['target']} | {r['mod_name']} | <i>{r['ts'][:16]}</i>"
+             for r in rows]
+    await message.answer("📋 <b>Журнал модерации:</b>\n\n" + "\n".join(lines))
+
+# ══════════════════════════════════════════════
+#  CASINO
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["казино", "casino"]))
+async def cmd_casino(message: Message):
+    args = message.text.split()
+    if len(args) < 3:
+        return await message.answer(
+            "🎰 <b>Казино</b>\n\n"
+            "/казино [чёт|нечет] [ставка]\n"
+            "/рулетка [число 0-36] [ставка]\n\n"
+            "Выигрыш x2 за чёт/нечет\nВыигрыш x35 за точное число"
+        )
+    choice = args[1].lower()
+    if choice not in ("чёт", "нечет", "чет"):
+        return await message.answer("⚠️ Выбери: чёт или нечет")
+    try:
+        bet = int(args[2])
+    except:
+        return await message.answer("❌ Ставка должна быть числом.")
+    if bet <= 0:
+        return await message.answer("❌ Ставка должна быть больше 0.")
+    uid = message.from_user.id
+    ensure_eco(uid)
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    if bal < bet:
+        return await message.answer(f"❌ Недостаточно средств. У тебя {bal} 💎.")
+    number = random.randint(0, 36)
+    is_even = number % 2 == 0 and number != 0
+    won = (choice in ("чёт", "чет") and is_even) or (choice == "нечет" and not is_even and number != 0)
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (bet, uid))
+    if won:
+        db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (bet * 2, uid))
+        result = f"✅ Выпало <b>{number}</b> ({'чёт' if is_even else 'нечет'}) — ты выиграл <b>{bet} 💎</b>!"
+    else:
+        result = f"❌ Выпало <b>{number}</b> ({'чёт' if is_even else 'нечет'}) — ты проиграл <b>{bet} 💎</b>."
+    new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    await message.answer(f"🎰 {result}\n💰 Баланс: <b>{new_bal} 💎</b>")
+
+@router.message(Command(commands=["рулетка", "roulette"]))
+async def cmd_roulette(message: Message):
+    args = message.text.split()
+    if len(args) < 3:
+        return await message.answer("⚠️ /рулетка [число 0-36] [ставка]")
+    try:
+        num = int(args[1])
+        bet = int(args[2])
+    except:
+        return await message.answer("❌ Укажи число и ставку.")
+    if num < 0 or num > 36:
+        return await message.answer("❌ Число от 0 до 36.")
+    if bet <= 0:
+        return await message.answer("❌ Ставка больше 0.")
+    uid = message.from_user.id
+    ensure_eco(uid)
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    if bal < bet:
+        return await message.answer(f"❌ У тебя {bal} 💎.")
+    result_num = random.randint(0, 36)
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (bet, uid))
+    if result_num == num:
+        win = bet * 35
+        db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (win, uid))
+        text = f"🎯 Выпало <b>{result_num}</b> — ДЖЕКПОТ! +<b>{win} 💎</b>!"
+    else:
+        text = f"❌ Выпало <b>{result_num}</b>, не {num}. Проиграл <b>{bet} 💎</b>."
+    new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    await message.answer(f"🎰 {text}\n💰 Баланс: <b>{new_bal} 💎</b>")
+
+# ══════════════════════════════════════════════
+#  DUEL
+# ══════════════════════════════════════════════
+duel_requests: dict = {}  # {target_id: {from_id, bet, chat_id}}
+
+@router.message(Command(commands=["дуэль", "duel"]))
+@need_reply
+async def cmd_duel(message: Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.answer("⚠️ /дуэль [ставка] (ответ на сообщение)")
+    bet = int(args[1])
+    if bet <= 0:
+        return await message.answer("❌ Ставка больше 0.")
+    challenger = message.from_user.id
+    target = message.reply_to_message.from_user.id
+    if challenger == target:
+        return await message.answer("❌ Нельзя дуэлировать с собой.")
+    ensure_eco(challenger)
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (challenger,))["balance"]
+    if bal < bet:
+        return await message.answer(f"❌ У тебя только {bal} 💎.")
+    duel_requests[target] = {"from_id": challenger, "bet": bet, "chat_id": message.chat.id,
+                              "from_name": message.from_user.full_name}
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принять", callback_data=f"duel_accept_{challenger}_{bet}"),
+         InlineKeyboardButton(text="❌ Отказать", callback_data=f"duel_decline_{challenger}")]
+    ])
+    t = message.reply_to_message.from_user
+    await message.answer(
+        f"⚔️ {mn(challenger, message.from_user.full_name)} вызывает {mn(target, t.full_name)} на дуэль!\n"
+        f"💰 Ставка: <b>{bet} 💎</b>\n\n"
+        f"{mn(target, t.full_name)}, принимаешь?",
+        reply_markup=kb
+    )
+
+@router.callback_query(F.data.startswith("duel_accept_"))
+async def cb_duel_accept(call: CallbackQuery):
+    parts = call.data.split("_")
+    challenger_id = int(parts[2])
+    bet = int(parts[3])
+    target_id = call.from_user.id
+    if target_id not in duel_requests:
+        return await call.answer("❌ Дуэль устарела.", show_alert=True)
+    req = duel_requests.pop(target_id)
+    ensure_eco(target_id)
+    bal_t = db_one("SELECT balance FROM economy WHERE user_id=?", (target_id,))["balance"]
+    if bal_t < bet:
+        return await call.answer(f"❌ У тебя только {bal_t} 💎.", show_alert=True)
+    bal_c = db_one("SELECT balance FROM economy WHERE user_id=?", (challenger_id,))["balance"]
+    if bal_c < bet:
+        return await call.answer("❌ У вызывающего не хватает средств.", show_alert=True)
+    winner = random.choice([challenger_id, target_id])
+    loser = target_id if winner == challenger_id else challenger_id
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (bet, loser))
+    db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (bet, winner))
+    w_name = call.from_user.full_name if winner == target_id else req["from_name"]
+    await call.message.edit_text(
+        f"⚔️ <b>Дуэль завершена!</b>\n\n"
+        f"🏆 Победитель: {mn(winner, w_name)}\n"
+        f"💰 Выигрыш: <b>{bet} 💎</b>"
+    )
+
+@router.callback_query(F.data.startswith("duel_decline_"))
+async def cb_duel_decline(call: CallbackQuery):
+    challenger_id = int(call.data.split("_")[2])
+    if call.from_user.id in duel_requests:
+        duel_requests.pop(call.from_user.id, None)
+    await call.message.edit_text(f"❌ {mn(call.from_user.id, call.from_user.full_name)} отказался от дуэли.")
+
+# ══════════════════════════════════════════════
+#  FISHING
+# ══════════════════════════════════════════════
+FISH_LIST = [
+    ("🐟 Карась", 10, 60),
+    ("🐠 Окунь", 20, 25),
+    ("🐡 Сазан", 40, 10),
+    ("🦈 Акула", 150, 3),
+    ("👟 Старый ботинок", 0, 15),
+    ("🌿 Водоросли", 0, 20),
+]
+
+@router.message(Command(commands=["рыбалка", "fish"]))
+async def cmd_fish(message: Message):
+    uid = message.from_user.id
+    db_exec("INSERT OR IGNORE INTO fishing (user_id) VALUES (?)", (uid,))
+    row = db_one("SELECT last_fish FROM fishing WHERE user_id=?", (uid,))
+    last = row["last_fish"] or ""
+    if last:
+        try:
+            diff = datetime.now() - datetime.fromisoformat(last)
+            if diff < timedelta(minutes=30):
+                rem = timedelta(minutes=30) - diff
+                m = int(rem.total_seconds()) // 60
+                s = int(rem.total_seconds()) % 60
+                return await message.answer(f"🎣 Рыба ещё не клюёт. Подожди <b>{m}мин {s}сек</b>.")
+        except:
+            pass
+    total = sum(w for _, _, w in FISH_LIST)
+    roll = random.uniform(0, total)
+    cum = 0
+    caught = FISH_LIST[-1]
+    for f in FISH_LIST:
+        cum += f[2]
+        if roll <= cum:
+            caught = f
+            break
+    db_exec("UPDATE fishing SET last_fish=? WHERE user_id=?", (datetime.now().isoformat(), uid))
+    name, price, _ = caught
+    if price > 0:
+        ensure_eco(uid)
+        db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (price, uid))
+        new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+        await message.answer(f"🎣 Поймал <b>{name}</b>! +<b>{price} 💎</b>\n💰 Баланс: <b>{new_bal} 💎</b>")
+    else:
+        await message.answer(f"🎣 Поймал <b>{name}</b>... Не повезло.")
+
+# ══════════════════════════════════════════════
+#  MINING
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["майнинг", "mine"]))
+async def cmd_mine(message: Message):
+    uid = message.from_user.id
+    db_exec("INSERT OR IGNORE INTO mining (user_id) VALUES (?)", (uid,))
+    row = db_one("SELECT last_mine, resources FROM mining WHERE user_id=?", (uid,))
+    last = row["last_mine"] or ""
+    if last:
+        try:
+            diff = datetime.now() - datetime.fromisoformat(last)
+            if diff < timedelta(hours=1):
+                rem = timedelta(hours=1) - diff
+                m = int(rem.total_seconds()) // 60
+                return await message.answer(f"⛏ Ресурсы ещё не добыты. Через <b>{m} мин</b>.")
+        except:
+            pass
+    amount = random.randint(10, 50)
+    db_exec("UPDATE mining SET last_mine=?, resources=resources+? WHERE user_id=?",
+            (datetime.now().isoformat(), amount, uid))
+    total = db_one("SELECT resources FROM mining WHERE user_id=?", (uid,))["resources"]
+    await message.answer(f"⛏ Добыто <b>{amount} руды</b>!\n📦 Всего руды: <b>{total}</b>")
+
+@router.message(Command(commands=["продатьруду", "sellore"]))
+async def cmd_sellore(message: Message):
+    uid = message.from_user.id
+    db_exec("INSERT OR IGNORE INTO mining (user_id) VALUES (?)", (uid,))
+    row = db_one("SELECT resources FROM mining WHERE user_id=?", (uid,))
+    res = row["resources"]
+    if res <= 0:
+        return await message.answer("❌ У тебя нет руды. /майнинг")
+    price = res * 5
+    ensure_eco(uid)
+    db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (price, uid))
+    db_exec("UPDATE mining SET resources=0 WHERE user_id=?", (uid,))
+    new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    await message.answer(f"⛏ Продано <b>{res} руды</b> за <b>{price} 💎</b>!\n💰 Баланс: <b>{new_bal} 💎</b>")
+
+# ══════════════════════════════════════════════
+#  BANK
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["банк", "bank"]))
+async def cmd_bank(message: Message):
+    uid = message.from_user.id
+    db_exec("INSERT OR IGNORE INTO bank (user_id) VALUES (?)", (uid,))
+    row = db_one("SELECT deposit, last_interest FROM bank WHERE user_id=?", (uid,))
+    ensure_eco(uid)
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    interest_info = ""
+    last = row["last_interest"] or ""
+    if last and row["deposit"] > 0:
+        try:
+            diff = datetime.now() - datetime.fromisoformat(last)
+            if diff >= timedelta(hours=24):
+                interest = int(row["deposit"] * 0.05)
+                db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (interest, uid))
+                db_exec("UPDATE bank SET last_interest=? WHERE user_id=?", (datetime.now().isoformat(), uid))
+                bal += interest
+                interest_info = f"\n✅ Начислено 5%: <b>+{interest} 💎</b>"
+        except:
+            pass
+    await message.answer(
+        f"🏦 <b>Банк</b>\n\n"
+        f"💰 На счету: <b>{bal} 💎</b>\n"
+        f"💵 Вклад: <b>{row['deposit']} 💎</b>\n"
+        f"📈 Процент: <b>5% в день</b>{interest_info}\n\n"
+        f"/вложить [сумма] — положить в банк\n"
+        f"/снятьвклад [сумма] — снять из банка"
+    )
+
+@router.message(Command(commands=["вложить", "deposit"]))
+async def cmd_deposit(message: Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.answer("⚠️ /вложить [сумма]")
+    amount = int(args[1])
+    if amount <= 0:
+        return await message.answer("❌ Сумма больше 0.")
+    uid = message.from_user.id
+    ensure_eco(uid)
+    db_exec("INSERT OR IGNORE INTO bank (user_id) VALUES (?)", (uid,))
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    if bal < amount:
+        return await message.answer(f"❌ У тебя {bal} 💎.")
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (amount, uid))
+    db_exec("UPDATE bank SET deposit=deposit+?, last_interest=? WHERE user_id=?",
+            (amount, datetime.now().isoformat(), uid))
+    dep = db_one("SELECT deposit FROM bank WHERE user_id=?", (uid,))["deposit"]
+    await message.answer(f"🏦 Вложено <b>{amount} 💎</b>!\n💵 Вклад: <b>{dep} 💎</b>")
+
+@router.message(Command(commands=["снятьвклад", "withdraw"]))
+async def cmd_withdraw(message: Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.answer("⚠️ /снятьвклад [сумма]")
+    amount = int(args[1])
+    uid = message.from_user.id
+    db_exec("INSERT OR IGNORE INTO bank (user_id) VALUES (?)", (uid,))
+    dep = db_one("SELECT deposit FROM bank WHERE user_id=?", (uid,))["deposit"]
+    if dep < amount:
+        return await message.answer(f"❌ Во вкладе только {dep} 💎.")
+    db_exec("UPDATE bank SET deposit=deposit-? WHERE user_id=?", (amount, uid))
+    ensure_eco(uid)
+    db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (amount, uid))
+    new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    await message.answer(f"🏦 Снято <b>{amount} 💎</b>\n💰 Баланс: <b>{new_bal} 💎</b>")
+
+# ══════════════════════════════════════════════
+#  GIFT
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["подарить", "gift"]))
+@need_reply
+async def cmd_gift(message: Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        return await message.answer("⚠️ /подарить [сумма] (ответ на сообщение)")
+    amount = int(args[1])
+    if amount <= 0:
+        return await message.answer("❌ Сумма больше 0.")
+    sender = message.from_user.id
+    receiver = message.reply_to_message.from_user.id
+    if sender == receiver:
+        return await message.answer("❌ Нельзя дарить себе.")
+    ensure_eco(sender); ensure_eco(receiver)
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (sender,))["balance"]
+    if bal < amount:
+        return await message.answer(f"❌ У тебя {bal} 💎.")
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (amount, sender))
+    db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (amount, receiver))
+    t = message.reply_to_message.from_user
+    await message.answer(f"🎁 {mn(sender, message.from_user.full_name)} подарил {mn(receiver, t.full_name)} <b>{amount} 💎</b>!")
+
+# ══════════════════════════════════════════════
+#  CLANS
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["создатьклан", "createclan"]))
+async def cmd_createclan(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("⚠️ /создатьклан [название]")
+    uid = message.from_user.id
+    if db_one("SELECT 1 FROM clan_members WHERE user_id=?", (uid,)):
+        return await message.answer("❌ Ты уже в клане.")
+    name = args[1].strip()
+    if db_one("SELECT 1 FROM clans WHERE name=?", (name,)):
+        return await message.answer("❌ Клан с таким именем уже существует.")
+    ensure_eco(uid)
+    cost = 1000
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    if bal < cost:
+        return await message.answer(f"❌ Нужно {cost} 💎 для создания клана.")
+    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
+    db_exec("INSERT INTO clans (name, leader) VALUES (?,?)", (name, uid))
+    clan = db_one("SELECT id FROM clans WHERE name=?", (name,))
+    db_exec("INSERT INTO clan_members (clan_id,user_id,name) VALUES (?,?,?)",
+            (clan["id"], uid, message.from_user.full_name))
+    await message.answer(f"🏰 Клан <b>{name}</b> создан!\nТы лидер клана.")
+
+@router.message(Command(commands=["клан", "clan"]))
+async def cmd_clan(message: Message):
+    uid = message.from_user.id
+    row = db_one("SELECT clan_id FROM clan_members WHERE user_id=?", (uid,))
+    if not row:
+        return await message.answer("❌ Ты не в клане. /создатьклан [название]")
+    clan = db_one("SELECT * FROM clans WHERE id=?", (row["clan_id"],))
+    members = db_all("SELECT name FROM clan_members WHERE clan_id=?", (clan["id"],))
+    await message.answer(
+        f"🏰 <b>Клан {clan['name']}</b>\n\n"
+        f"👑 Лидер: <code>{clan['leader']}</code>\n"
+        f"👥 Участников: <b>{len(members)}</b>\n"
+        f"💰 Казна: <b>{clan['balance']} 💎</b>\n\n"
+        f"Состав:\n" + "\n".join(f"• {m['name']}" for m in members)
+    )
+
+@router.message(Command(commands=["вступитьвклан", "joinclan"]))
+async def cmd_joinclan(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("⚠️ /вступитьвклан [название]")
+    uid = message.from_user.id
+    if db_one("SELECT 1 FROM clan_members WHERE user_id=?", (uid,)):
+        return await message.answer("❌ Ты уже в клане. Сначала выйди: /выйтиизклана")
+    clan = db_one("SELECT id FROM clans WHERE name=?", (args[1].strip(),))
+    if not clan:
+        return await message.answer("❌ Клан не найден.")
+    db_exec("INSERT INTO clan_members (clan_id,user_id,name) VALUES (?,?,?)",
+            (clan["id"], uid, message.from_user.full_name))
+    await message.answer(f"✅ Ты вступил в клан <b>{args[1]}</b>!")
+
+@router.message(Command(commands=["выйтиизклана", "leaveclan"]))
+async def cmd_leaveclan(message: Message):
+    uid = message.from_user.id
+    row = db_one("SELECT clan_id FROM clan_members WHERE user_id=?", (uid,))
+    if not row:
+        return await message.answer("❌ Ты не в клане.")
+    clan = db_one("SELECT leader FROM clans WHERE id=?", (row["clan_id"],))
+    if clan["leader"] == uid:
+        return await message.answer("❌ Лидер не может выйти. Сначала передай лидерство или распусти клан.")
+    db_exec("DELETE FROM clan_members WHERE user_id=?", (uid,))
+    await message.answer("✅ Ты вышел из клана.")
+
+@router.message(Command(commands=["топкланов", "clantop"]))
+async def cmd_clantop(message: Message):
+    rows = db_all("""
+        SELECT c.name, c.balance, COUNT(cm.user_id) as cnt
+        FROM clans c LEFT JOIN clan_members cm ON c.id=cm.clan_id
+        GROUP BY c.id ORDER BY cnt DESC LIMIT 10
+    """)
+    if not rows:
+        return await message.answer("🏰 Кланов пока нет.")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"{medals[i] if i<3 else str(i+1)+'.'} <b>{r['name']}</b> — {r['cnt']} участников | {r['balance']} 💎"
+             for i, r in enumerate(rows)]
+    await message.answer("🏰 <b>Топ кланов:</b>\n\n" + "\n".join(lines))
+
+# ══════════════════════════════════════════════
+#  STATS TOP
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["топбаланса", "topbalance"]))
+async def cmd_topbalance(message: Message):
+    rows = db_all("SELECT user_id, balance FROM economy ORDER BY balance DESC LIMIT 10", ())
+    if not rows:
+        return await message.answer("💰 Данных нет.")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"{medals[i] if i<3 else str(i+1)+'.'} <code>{r['user_id']}</code> — <b>{r['balance']} 💎</b>"
+             for i, r in enumerate(rows)]
+    await message.answer("💰 <b>Топ богатейших:</b>\n\n" + "\n".join(lines))
+
+@router.message(Command(commands=["топварнов", "topwarns"]))
+async def cmd_topwarns(message: Message):
+    if not is_group(message):
+        return await message.answer("❌ Только в группах.")
+    rows = db_all("""
+        SELECT user_id, COUNT(*) as cnt FROM warns
+        WHERE chat_id=? GROUP BY user_id ORDER BY cnt DESC LIMIT 10
+    """, (message.chat.id,))
+    if not rows:
+        return await message.answer("✅ Варнов нет.")
+    lines = [f"{i+1}. <code>{r['user_id']}</code> — <b>{r['cnt']}</b> варнов"
+             for i, r in enumerate(rows)]
+    await message.answer("⚠️ <b>Топ варнов:</b>\n\n" + "\n".join(lines))
+
+@router.message(Command(commands=["история", "history"]))
+async def cmd_history(message: Message):
+    uid = message.from_user.id
+    ensure_eco(uid)
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    dep = db_one("SELECT deposit FROM bank WHERE user_id=?", (uid,)) if db_one("SELECT 1 FROM bank WHERE user_id=?", (uid,)) else None
+    fish = db_one("SELECT last_fish FROM fishing WHERE user_id=?", (uid,))
+    mine = db_one("SELECT last_mine, resources FROM mining WHERE user_id=?", (uid,))
+    await message.answer(
+        f"📊 <b>Твоя история</b>\n\n"
+        f"💰 Баланс: <b>{bal} 💎</b>\n"
+        f"🏦 Вклад: <b>{dep['deposit'] if dep else 0} 💎</b>\n"
+        f"🎣 Последняя рыбалка: <i>{(fish['last_fish'] or 'никогда')[:16]}</i>\n"
+        f"⛏ Последний майнинг: <i>{(mine['last_mine'] if mine else 'никогда')[:16]}</i>\n"
+        f"📦 Руды: <b>{mine['resources'] if mine else 0}</b>"
+    )
+
+# ══════════════════════════════════════════════
+#  FACTORY RAID
+# ══════════════════════════════════════════════
+raid_cooldowns: dict = {}
+
+@router.message(Command(commands=["ограбить", "raid"]))
+@need_reply
+async def cmd_raid(message: Message):
+    attacker = message.from_user.id
+    victim = message.reply_to_message.from_user.id
+    if attacker == victim:
+        return await message.answer("❌ Нельзя грабить себя.")
+    now = time.time()
+    if attacker in raid_cooldowns and now - raid_cooldowns[attacker] < 3600:
+        rem = int(3600 - (now - raid_cooldowns[attacker])) // 60
+        return await message.answer(f"⏳ Ограбление на перезарядке. Через <b>{rem} мин</b>.")
+    vf = db_one("SELECT * FROM factories WHERE user_id=?", (victim,))
+    if not vf:
+        return await message.answer("❌ У этого игрока нет завода.")
+    af = db_one("SELECT level FROM factories WHERE user_id=?", (attacker,))
+    if not af:
+        return await message.answer("❌ Сначала купи свой завод /купитьзавод")
+    success = random.random() < 0.45
+    raid_cooldowns[attacker] = now
+    if success:
+        steal = factory_income(vf["level"], vf["workers"], vf["upgrades"]) // 2
+        ensure_eco(attacker); ensure_eco(victim)
+        bal_v = db_one("SELECT balance FROM economy WHERE user_id=?", (victim,))["balance"]
+        steal = min(steal, bal_v)
+        if steal > 0:
+            db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (steal, attacker))
+            db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (steal, victim))
+        t = message.reply_to_message.from_user
+        await message.answer(
+            f"💥 Ограбление удалось!\n"
+            f"🏭 Завод {mn(victim, t.full_name)} разграблен!\n"
+            f"💰 Украдено: <b>{steal} 💎</b>")
+    else:
+        t = message.reply_to_message.from_user
+        await message.answer(f"❌ Ограбление провалилось! Охрана завода {mn(victim, t.full_name)} отбила атаку.")
