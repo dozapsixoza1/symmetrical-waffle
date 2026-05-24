@@ -421,17 +421,18 @@ async def on_group_message(message: Message):
             msgs=msgs+1, name=excluded.name, username=excluded.username
     """, (cid, uid, message.from_user.full_name, message.from_user.username or ""))
 
-    # multi-prefix commands
+    # если команда с / — не трогаем, aiogram сам роутит
+    if text.startswith('/'):
+        return
+
+    # multi-prefix команды (. ! - + и без префикса)
     parsed = parse_cmd(text)
     if parsed:
         cmd, args = parsed
-        if text.startswith('/') or any(text.startswith(p) for p in PREFIXES[1:]) or cmd in KNOWN_CMDS:
+        if any(text.startswith(p) for p in PREFIXES[1:]) or cmd in KNOWN_CMDS:
             handled = await handle_alias_cmd(message, cmd, args)
             if handled:
                 return
-
-    if text.startswith('/'):
-        return
     if await check_mod(bot, cid, uid):
         await check_triggers(message, cid, text)
         return
@@ -1513,16 +1514,26 @@ async def cmd_remove_bot_rank(message: Message):
     my_rank = get_bot_rank(uid)
     if my_rank > 6:
         return await message.answer("❌ Недостаточно прав.")
-    if not message.reply_to_message:
-        return await message.answer("⚠️ Ответь на сообщение участника.")
-    t = message.reply_to_message.from_user
-    if t.id == OWNER_ID:
+    # Получаем target: reply или ID в аргументе
+    target_id = None
+    target_name = "пользователь"
+    args = message.text.split()
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        target_name = message.reply_to_message.from_user.full_name
+    elif len(args) > 1 and args[1].isdigit():
+        target_id = int(args[1])
+        row = db_one("SELECT name FROM bot_staff WHERE user_id=?", (target_id,))
+        target_name = row["name"] if row else str(target_id)
+    else:
+        return await message.answer("⚠️ Ответь на сообщение или укажи ID: /снятьдолжность [user_id]")
+    if target_id == OWNER_ID:
         return await message.answer("❌ Нельзя снять владельца.")
-    their_rank = get_bot_rank(t.id)
+    their_rank = get_bot_rank(target_id)
     if not can_appoint(my_rank, their_rank):
         return await message.answer("❌ Нельзя снять человека с должностью выше или равной твоей.")
-    db_exec("DELETE FROM bot_staff WHERE user_id=?", (t.id,))
-    await message.answer(f"✅ Должность {mn(t.id, t.full_name)} снята.")
+    db_exec("DELETE FROM bot_staff WHERE user_id=?", (target_id,))
+    await message.answer(f"✅ Должность {mn(target_id, target_name)} снята.")
 
 # ══════════════════════════════════════════════
 #  OWNER COMMANDS
