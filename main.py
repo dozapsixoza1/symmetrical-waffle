@@ -363,12 +363,6 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 
-# Это "шпион", который не мешает командам
-@router.message()
-async def logger_middleware(message: Message):
-    print(f"DEBUG: {message.text}")
-    # Важно: здесь НЕТ return или обработки, бот пойдет дальше
-
 # ══════════════════════════════════════════════
 #  BOT JOIN
 # ══════════════════════════════════════════════
@@ -2005,7 +1999,7 @@ async def cb_help(call: CallbackQuery):
         "инвентарь • кейс • завод • топзавод\n"
         "жениться • семья • должности • чаты",
         reply_markup=kb_back()
-    )
+)
 
 # ══════════════════════════════════════════════
 #  REPORT SYSTEM
@@ -2270,21 +2264,6 @@ async def update_member_counts():
                 db_exec("UPDATE chats SET member_count=? WHERE chat_id=?", (count, r["chat_id"]))
             except:
                 pass
-
-# ══════════════════════════════════════════════
-#  LAUNCH
-# ══════════════════════════════════════════════
-async def main():
-    dp.include_router(router)
-    log.info("🚀 Replify запущен")
-    asyncio.create_task(update_member_counts())
-    await dp.start_polling(
-        bot,
-        allowed_updates=["message", "chat_member", "my_chat_member", "callback_query", "message_reaction"]
-    )
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 # ══════════════════════════════════════════════
 #  ADMIN WARNS (аварн)
@@ -2944,8 +2923,18 @@ async def cmd_raid(message: Message):
     else:
         t = message.reply_to_message.from_user
         await message.answer(f"❌ Ограбление провалилось! Охрана завода {mn(victim, t.full_name)} отбила атаку.")
-print("==========================================")
-    print("Бот готов к работе!")
-    print(f"Токен: {BOT_TOKEN[:10]}... (проверь, что это верный токен)")
-    print("Жду сообщений в ЛС или в чатах...")
-    print("==========================================")
+
+# ══════════════════════════════════════════════
+#  LAUNCH
+# ══════════════════════════════════════════════
+async def main():
+    dp.include_router(router)
+    log.info("🚀 Replify запущен")
+    asyncio.create_task(update_member_counts())
+    await dp.start_polling(
+        bot,
+        allowed_updates=["message", "chat_member", "my_chat_member", "callback_query", "message_reaction"]
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
