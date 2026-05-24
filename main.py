@@ -41,8 +41,8 @@ bot_data = load_data()
 # ══════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-OWNER_ID = 8675927241
+BOT_TOKEN = "8701660855:AAFiYKKSngpNbkacMzSTjosC0fBS1KvmIG4"
+OWNER_ID = 8526401545
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("replify")
