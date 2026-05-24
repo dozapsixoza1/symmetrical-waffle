@@ -409,9 +409,13 @@ async def on_member_update(event: ChatMemberUpdated):
 
 # ══════════════════════════════════════════════
 #  GROUP MESSAGE HANDLER
-#  ИСПРАВЛЕНО: ~Command() чтобы слэш-команды шли напрямую в хэндлеры
+#  ИСПРАВЛЕНО: фильтр чтобы слэш-команды шли напрямую в хэндлеры
 # ══════════════════════════════════════════════
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), ~Command())
+def not_slash_command(message: Message) -> bool:
+    text = message.text or message.caption or ""
+    return not text.startswith('/')
+
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), not_slash_command)
 async def on_group_message(message: Message):
     if not message.from_user:
         return
