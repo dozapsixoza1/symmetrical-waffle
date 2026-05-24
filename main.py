@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS stats (
     PRIMARY KEY (chat_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS economy (
-    user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, last_bonus TEXT DEFAULT ''
+    user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, last_bonus TEXT DEFAULT '', last_case TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item TEXT
@@ -100,6 +100,13 @@ CREATE TABLE IF NOT EXISTS factories (
 );
 """)
 conn.commit()
+
+# Миграция: добавить last_case если нет
+try:
+    cur.execute("ALTER TABLE economy ADD COLUMN last_case TEXT DEFAULT ''")
+    conn.commit()
+except:
+    pass
 
 cur.execute("SELECT COUNT(*) FROM shop")
 if cur.fetchone()[0] == 0:
@@ -266,7 +273,6 @@ def parse_cmd(text: str):
     if not text:
         return None
     text = text.strip()
-    # с префиксом
     for p in PREFIXES:
         if text.startswith(p):
             parts = text[len(p):].split()
@@ -274,12 +280,10 @@ def parse_cmd(text: str):
                 cmd = parts[0].split('@')[0].lower()
                 args = parts[1:]
                 return cmd, args
-    # без префикса — только если первое слово = известная команда
     parts = text.split()
     cmd = parts[0].lower()
     return cmd, parts[1:]
 
-# известные команды (заполняется ниже)
 KNOWN_CMDS: set = set()
 
 # ══════════════════════════════════════════════
@@ -405,8 +409,9 @@ async def on_member_update(event: ChatMemberUpdated):
 
 # ══════════════════════════════════════════════
 #  GROUP MESSAGE HANDLER
+#  ИСПРАВЛЕНО: ~Command() чтобы слэш-команды шли напрямую в хэндлеры
 # ══════════════════════════════════════════════
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), ~Command())
 async def on_group_message(message: Message):
     if not message.from_user:
         return
@@ -421,17 +426,15 @@ async def on_group_message(message: Message):
             msgs=msgs+1, name=excluded.name, username=excluded.username
     """, (cid, uid, message.from_user.full_name, message.from_user.username or ""))
 
-    # multi-prefix commands
+    # multi-prefix commands (. ! - +)
     parsed = parse_cmd(text)
     if parsed:
         cmd, args = parsed
-        if text.startswith('/') or any(text.startswith(p) for p in PREFIXES[1:]) or cmd in KNOWN_CMDS:
+        if any(text.startswith(p) for p in PREFIXES[1:]):
             handled = await handle_alias_cmd(message, cmd, args)
             if handled:
                 return
 
-    if text.startswith('/'):
-        return
     if await check_mod(bot, cid, uid):
         await check_triggers(message, cid, text)
         return
@@ -604,7 +607,7 @@ async def do_help(message: Message, args=None):
         "/зарыть /швырнуть /лизнуть /укачать /потискать\n\n"
         "<b>💑 Социальные</b>\n"
         "/жениться /развестись /семья /усыновить\n\n"
-        "<i>Команды можно писать с / . ! - + или без префикса</i>",
+        "<i>Команды можно писать с / . ! - +</i>",
         reply_markup=kb_main()
     )
 
@@ -734,13 +737,31 @@ async def do_inventory(message: Message, args=None):
     await message.answer("🎒 <b>Инвентарь:</b>\n" + "\n".join(f"• {r['item']} x{r['cnt']}" for r in rows),
                          reply_markup=kb_back())
 
+# ИСПРАВЛЕНО: добавлен КД на кейс (1 час)
 async def do_case(message: Message, args=None):
     uid = message.from_user.id
     ensure_eco(uid)
     cost = 50
-    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    row = db_one("SELECT balance, last_case FROM economy WHERE user_id=?", (uid,))
+    
+    # Проверка КД
+    last_case = row.get("last_case", "") or ""
+    if last_case:
+        try:
+            last_dt = datetime.fromisoformat(last_case)
+            diff = datetime.now() - last_dt
+            if diff < timedelta(hours=1):
+                rem = timedelta(hours=1) - diff
+                m = int(rem.total_seconds()) // 60
+                s = int(rem.total_seconds()) % 60
+                return await message.answer(f"⏳ Следующий кейс через <b>{m}мин {s}сек</b>.")
+        except:
+            pass
+
+    bal = row["balance"]
     if bal < cost:
         return await message.answer(f"❌ Нужно {cost} 💎, у тебя {bal} 💎.")
+    
     prizes = [
         ("💎 Кристалл", 5), ("🍀 Амулет", 10), ("🎭 VIP-статус", 2),
         ("💰 200 монет", 15), ("💰 100 монет", 28), ("💰 50 монет", 40),
@@ -752,7 +773,9 @@ async def do_case(message: Message, args=None):
         cum += weight
         if roll <= cum:
             prize = name; break
-    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
+    
+    db_exec("UPDATE economy SET balance=balance-?, last_case=? WHERE user_id=?",
+            (cost, datetime.now().isoformat(), uid))
     if "монет" in prize:
         coins = int(prize.split()[1])
         db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (coins, uid))
@@ -798,24 +821,19 @@ async def do_staff(message: Message, args=None):
 async def do_bot_staff(message: Message, args=None):
     rows = db_all("SELECT user_id,rank_id,rank_name,name FROM bot_staff ORDER BY rank_id", ())
     lines = [f"• {r['rank_name']} — {mn(r['user_id'], r['name'] or str(r['user_id']))}" for r in rows]
-    # Добавить владельца
     owner_line = f"• 👑 Владелец — {mn(OWNER_ID, 'Владелец бота')}"
     await message.answer(f"👑 <b>Должности в боте:</b>\n\n{owner_line}\n" + "\n".join(lines) if lines
                          else f"👑 <b>Должности в боте:</b>\n\n{owner_line}\n\n<i>Стафф не назначен</i>")
 
 async def do_chats(message: Message, args=None):
-    """Список чатов где есть бот"""
     rows = db_all("SELECT * FROM chats ORDER BY member_count DESC", ())
     if not rows:
         return await message.answer("📋 Бот не добавлен ни в один чат.")
-
-    # топ по активности
     top_stats = db_all("""
         SELECT chat_id, SUM(msgs) as total FROM stats
         GROUP BY chat_id ORDER BY total DESC LIMIT 3
     """)
     top_ids = [r["chat_id"] for r in top_stats]
-
     lines = []
     for i, r in enumerate(rows, 1):
         link = f"@{r['username']}" if r.get("username") else f"<code>{r['chat_id']}</code>"
@@ -824,7 +842,6 @@ async def do_chats(message: Message, args=None):
             f"<b>{i}.</b> {r['title'] or 'Без названия'}{trophy}\n"
             f"   👥 {r['member_count']} участников | 🆔 {link}"
         )
-
     owner_link = mn(OWNER_ID, "Владелец")
     text = (f"💬 <b>Чаты где есть Replify</b> ({len(rows)}):\n\n" +
             "\n\n".join(lines) +
@@ -891,9 +908,6 @@ async def do_factory_top(message: Message, args=None):
         lines.append(f"{medal} <code>{r['user_id']}</code> — ур.<b>{r['level']}</b> | {income} 💎/ч")
     await message.answer("🏭 <b>Топ заводов:</b>\n\n" + "\n".join(lines))
 
-# ══════════════════════════════════════════════
-#  BOT STAFF COMMANDS
-# ══════════════════════════════════════════════
 async def do_family(message: Message, args=None):
     uid = message.from_user.id
     rel = db_one("SELECT user1,user2 FROM relationships WHERE user1=? OR user2=?", (uid, uid))
@@ -1511,6 +1525,7 @@ for _cmd, (_em, _act) in RP_ACTIONS.items():
 
 # ══════════════════════════════════════════════
 #  BOT STAFF MANAGEMENT
+#  ИСПРАВЛЕНО: поддержка назначения через ID (без ответа на сообщение)
 # ══════════════════════════════════════════════
 @router.message(Command(commands=["назначитьдолжность", "setrank"]))
 async def cmd_set_bot_rank(message: Message):
@@ -1518,27 +1533,43 @@ async def cmd_set_bot_rank(message: Message):
     my_rank = get_bot_rank(uid)
     if my_rank > 6:
         return await message.answer("❌ Недостаточно прав.")
-    if not message.reply_to_message:
-        return await message.answer(
-            "⚠️ Ответь на сообщение и укажи номер должности:\n\n" +
-            "\n".join(f"{k}. {v}" for k, v in RANKS.items()) +
-            "\n\nПример: /назначитьдолжность 7"
-        )
+
     args = message.text.split()
-    if len(args) < 2 or not args[1].isdigit():
-        return await message.answer("⚠️ Укажи номер должности (1-9).")
-    target_rank = int(args[1])
+    ranks_text = "\n".join(f"{k}. {v}" for k, v in RANKS.items())
+
+    # Определяем цель: через ответ или через ID
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        target_name = message.reply_to_message.from_user.full_name
+        rank_arg = args[1] if len(args) > 1 else None
+    elif len(args) >= 3 and args[1].lstrip('-').isdigit():
+        # /назначитьдолжность [user_id] [номер]
+        target_id = int(args[1])
+        target_name = str(target_id)
+        rank_arg = args[2]
+    else:
+        return await message.answer(
+            f"⚠️ Использование:\n"
+            f"<b>Через ID:</b> /назначитьдолжность [user_id] [номер]\n"
+            f"<b>Через ответ:</b> ответь на сообщение + /назначитьдолжность [номер]\n\n"
+            f"<b>Должности:</b>\n{ranks_text}"
+        )
+
+    if not rank_arg or not rank_arg.isdigit():
+        return await message.answer(f"⚠️ Укажи номер должности (1-9).\n\n{ranks_text}")
+
+    target_rank = int(rank_arg)
     if target_rank < 1 or target_rank > 9:
-        return await message.answer("❌ Должность должна быть от 1 до 9.")
+        return await message.answer("❌ Должность от 1 до 9.")
     if not can_appoint(my_rank, target_rank):
         return await message.answer("❌ Нельзя назначить должность выше или равную своей.")
-    t = message.reply_to_message.from_user
-    if t.id == OWNER_ID:
+    if target_id == OWNER_ID:
         return await message.answer("❌ Нельзя изменить должность владельца.")
+
     rank_name = RANKS[target_rank]
     db_exec("INSERT OR REPLACE INTO bot_staff (user_id,rank_id,rank_name,name) VALUES (?,?,?,?)",
-            (t.id, target_rank, rank_name, t.full_name))
-    await message.answer(f"✅ {mn(t.id, t.full_name)} назначен(а) на должность <b>{rank_name}</b>")
+            (target_id, target_rank, rank_name, target_name))
+    await message.answer(f"✅ {mn(target_id, target_name)} назначен(а) на должность <b>{rank_name}</b>")
 
 @router.message(Command(commands=["снятьдолжность", "removerank"]))
 async def cmd_remove_bot_rank(message: Message):
@@ -1546,16 +1577,26 @@ async def cmd_remove_bot_rank(message: Message):
     my_rank = get_bot_rank(uid)
     if my_rank > 6:
         return await message.answer("❌ Недостаточно прав.")
-    if not message.reply_to_message:
-        return await message.answer("⚠️ Ответь на сообщение участника.")
-    t = message.reply_to_message.from_user
-    if t.id == OWNER_ID:
+
+    args = message.text.split()
+
+    # Через ответ или через ID
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        target_name = message.reply_to_message.from_user.full_name
+    elif len(args) >= 2 and args[1].lstrip('-').isdigit():
+        target_id = int(args[1])
+        target_name = str(target_id)
+    else:
+        return await message.answer("⚠️ Ответь на сообщение или укажи ID: /снятьдолжность [user_id]")
+
+    if target_id == OWNER_ID:
         return await message.answer("❌ Нельзя снять владельца.")
-    their_rank = get_bot_rank(t.id)
+    their_rank = get_bot_rank(target_id)
     if not can_appoint(my_rank, their_rank):
         return await message.answer("❌ Нельзя снять человека с должностью выше или равной твоей.")
-    db_exec("DELETE FROM bot_staff WHERE user_id=?", (t.id,))
-    await message.answer(f"✅ Должность {mn(t.id, t.full_name)} снята.")
+    db_exec("DELETE FROM bot_staff WHERE user_id=?", (target_id,))
+    await message.answer(f"✅ Должность {mn(target_id, target_name)} снята.")
 
 # ══════════════════════════════════════════════
 #  OWNER COMMANDS
@@ -1566,8 +1607,9 @@ async def cmd_ownerhelp(message: Message):
     await message.answer(
         "👑 <b>Команды владельца бота</b>\n\n"
         "<b>👥 Стафф бота</b>\n"
-        "/назначитьдолжность [1-9] — назначить должность (ответ на сообщение)\n"
-        "/снятьдолжность — снять должность\n"
+        "/назначитьдолжность [user_id] [1-9] — назначить по ID\n"
+        "/назначитьдолжность [1-9] — назначить через ответ\n"
+        "/снятьдолжность [user_id] — снять по ID\n"
         "/должности — список стаффа\n\n"
         "<b>📋 Чаты</b>\n"
         "/мойчаты — приватный список чатов\n"
@@ -1948,14 +1990,32 @@ async def cb_buy(call: CallbackQuery):
     new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
     await call.answer(f"✅ Куплено: {item['name']}! Баланс: {new_bal} 💎", show_alert=True)
 
+# ИСПРАВЛЕНО: кейс через кнопку тоже с КД
 @router.callback_query(F.data == "case")
 async def cb_case(call: CallbackQuery):
     uid = call.from_user.id
     ensure_eco(uid)
     cost = 50
-    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    row = db_one("SELECT balance, last_case FROM economy WHERE user_id=?", (uid,))
+
+    # Проверка КД
+    last_case = row.get("last_case", "") or ""
+    if last_case:
+        try:
+            last_dt = datetime.fromisoformat(last_case)
+            diff = datetime.now() - last_dt
+            if diff < timedelta(hours=1):
+                rem = timedelta(hours=1) - diff
+                m = int(rem.total_seconds()) // 60
+                s = int(rem.total_seconds()) % 60
+                return await call.answer(f"⏳ Следующий кейс через {m}мин {s}сек", show_alert=True)
+        except:
+            pass
+
+    bal = row["balance"]
     if bal < cost:
         return await call.answer(f"❌ Нужно {cost} 💎, у тебя {bal} 💎.", show_alert=True)
+
     prizes = [
         ("💎 Кристалл", 5), ("🍀 Амулет", 10), ("🎭 VIP-статус", 2),
         ("💰 200 монет", 15), ("💰 100 монет", 28), ("💰 50 монет", 40),
@@ -1967,7 +2027,9 @@ async def cb_case(call: CallbackQuery):
         cum += weight
         if roll <= cum:
             prize = name; break
-    db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
+
+    db_exec("UPDATE economy SET balance=balance-?, last_case=? WHERE user_id=?",
+            (cost, datetime.now().isoformat(), uid))
     if "монет" in prize:
         coins = int(prize.split()[1])
         db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (coins, uid))
@@ -1993,7 +2055,7 @@ async def cb_top(call: CallbackQuery):
 async def cb_help(call: CallbackQuery):
     await call.message.edit_text(
         "📋 <b>Команды</b>\n\n"
-        "Можно писать с / . ! - + или без префикса\n\n"
+        "Можно писать с / . ! - +\n\n"
         "старт • помощь • профиль • баланс\n"
         "бонус • топ • стата • чат • магазин\n"
         "инвентарь • кейс • завод • топзавод\n"
@@ -2005,7 +2067,6 @@ async def cb_help(call: CallbackQuery):
 #  UPDATE MEMBER COUNT
 # ══════════════════════════════════════════════
 async def update_member_counts():
-    """Обновляет кол-во участников каждые 10 минут"""
     while True:
         await asyncio.sleep(600)
         rows = db_all("SELECT chat_id FROM chats", ())
