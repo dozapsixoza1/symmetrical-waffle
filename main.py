@@ -435,7 +435,7 @@ async def on_member_update(event: ChatMemberUpdated):
 # ══════════════════════════════════════════════
 #  GROUP MESSAGE HANDLER
 # ══════════════════════════════════════════════
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), ~F.text.startswith('/'))
 async def on_group_message(message: Message):
     if not message.from_user:
         return
@@ -450,10 +450,6 @@ async def on_group_message(message: Message):
         ON CONFLICT(chat_id,user_id) DO UPDATE SET
             msgs=msgs+1, name=excluded.name, username=excluded.username
     """, (cid, uid, message.from_user.full_name, message.from_user.username or ""))
-
-    # если команда с / — не трогаем, aiogram сам роутит
-    if text.startswith('/'):
-        return
 
     # multi-prefix команды (. ! - + и без префикса)
     parsed = parse_cmd(text)
