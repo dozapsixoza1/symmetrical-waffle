@@ -363,9 +363,11 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 
-@router.message(F.text)
-async def debug_all_messages(message: Message):
-    print(f"DEBUG: Чат {message.chat.id}, Тип: {message.chat.type}, Текст: {message.text}")
+# Это "шпион", который не мешает командам
+@router.message()
+async def logger_middleware(message: Message):
+    print(f"DEBUG: {message.text}")
+    # Важно: здесь НЕТ return или обработки, бот пойдет дальше
 
 # ══════════════════════════════════════════════
 #  BOT JOIN
