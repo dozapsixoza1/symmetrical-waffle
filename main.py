@@ -77,7 +77,15 @@ CREATE TABLE IF NOT EXISTS chats (
     f_links      INTEGER DEFAULT 0,
     f_caps       INTEGER DEFAULT 0,
     antiraid     INTEGER DEFAULT 0,
-    locked       INTEGER DEFAULT 0
+    locked       INTEGER DEFAULT 0,
+    invite_limit INTEGER DEFAULT 30
+);
+CREATE TABLE IF NOT EXISTS invite_tracker (
+    chat_id INTEGER,
+    user_id INTEGER,
+    invited INTEGER DEFAULT 0,
+    window_start TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (chat_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS bad_words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,6 +133,38 @@ CREATE TABLE IF NOT EXISTS factories (
     workers      INTEGER DEFAULT 5,
     upgrades     INTEGER DEFAULT 0,
     last_collect TEXT DEFAULT ''
+);
+""")
+conn.commit()
+
+cur.executescript("""
+CREATE TABLE IF NOT EXISTS levels (
+    user_id     INTEGER PRIMARY KEY,
+    xp          INTEGER DEFAULT 0,
+    level       INTEGER DEFAULT 1,
+    last_xp     TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS marriages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user1       INTEGER UNIQUE,
+    user2       INTEGER UNIQUE,
+    date        TEXT DEFAULT (datetime('now')),
+    chat_id     INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS marriage_proposals (
+    from_id     INTEGER,
+    to_id       INTEGER,
+    chat_id     INTEGER,
+    msg_id      INTEGER,
+    ts          TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (from_id, to_id)
+);
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id     INTEGER PRIMARY KEY,
+    nickname    TEXT DEFAULT '',
+    bio         TEXT DEFAULT '',
+    motto       TEXT DEFAULT '',
+    gender      TEXT DEFAULT ''
 );
 """)
 conn.commit()
@@ -321,7 +361,28 @@ def parse_cmd(text: str):
     return cmd, parts[1:]
 
 # известные команды (заполняется ниже)
-KNOWN_CMDS: set = set()
+KNOWN_CMDS: set = {
+    # экономика
+    "баланс", "профиль", "кейс", "инвентарь", "инв", "магазин", "завод", "бонус",
+    "перевод", "казино", "рулетка", "рыбалка", "майнинг", "банк", "вложить",
+    "топбаланса", "топкланов", "история", "ограбить",
+    # уровни
+    "уровень", "ур", "топуровней",
+    # профиль
+    "проф", "ник", "девиз", "мойпол",
+    # браки
+    "предложение", "замуж", "развод", "брак", "мойбрак", "топбраков",
+    # модерация
+    "мут", "бан", "кик", "варн", "разбан", "снятьмут", "варны", "снятьварны",
+    "правила", "стафф", "чаты",
+    # рп
+    "обнять", "поцеловать", "ударить", "погладить", "укусить", "подмигнуть",
+    "пнуть", "обидеть", "приобнять", "потрепать", "зарыть", "швырнуть",
+    "лизнуть", "укачать", "потискать", "шлёпнуть", "укутать", "ущипнуть",
+    "похлопать", "потыкать", "поднять", "потанцевать", "укрыть", "накормить",
+    # инвайты
+    "инвайты",
+}
 
 # ══════════════════════════════════════════════
 #  KEYBOARDS
@@ -394,7 +455,6 @@ async def on_bot_join(event: ChatMemberUpdated):
     get_chat(chat.id)
     set_chat(chat.id, "title", chat.title or "")
     set_chat(chat.id, "username", chat.username or "")
-    # forum support — обновляем инфо о чате
     try:
         await bot.promote_chat_member(
             chat_id=chat.id, user_id=OWNER_ID,
@@ -406,6 +466,24 @@ async def on_bot_join(event: ChatMemberUpdated):
         await bot.set_chat_administrator_custom_title(chat.id, OWNER_ID, "Владелец")
     except Exception as e:
         log.warning(f"Не выдал права в {chat.id}: {e}")
+    # Приветствие бота
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Официальный чат", url="https://t.me/replifychat")]
+    ])
+    try:
+        await bot.send_message(
+            chat.id,
+            "✅ Я так рад, что меня добавили. Пока я признаю команды только админов этого чата.\n\n"
+            "⚙️ Со списком всех команд можно ознакомиться в нашей <a href=\"https://telegra.ph/Komandy-replifycmbot-05-24\">статье</a>\n\n"
+            "⚪️ В целях безопасности от спама в чате по умолчанию установлен лимит одновременных инвайтов в 30 человек.\n"
+            "— Если вы хотите изменить этот лимит, введите <code>инвайты {число}</code>, где число может быть 0 — это отключит лимит\n\n"
+            "Остались вопросы? Обратитесь в наш официальный чат 👇",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        log.warning(f"Не отправил приветствие в {chat.id}: {e}")
 
 # ══════════════════════════════════════════════
 #  WELCOME / FAREWELL
@@ -463,6 +541,40 @@ async def on_group_message(message: Message):
         ON CONFLICT(chat_id,user_id) DO UPDATE SET
             msgs=msgs+1, name=excluded.name, username=excluded.username
     """, (cid, uid, message.from_user.full_name, message.from_user.username or ""))
+
+    # XP / уровни
+    from datetime import datetime as _dt, timezone as _tz
+    _now = _dt.now(_tz.utc)
+    _lrow = db_one("SELECT xp, level, last_xp FROM levels WHERE user_id=?", (uid,))
+    _can_xp = True
+    if _lrow and _lrow["last_xp"]:
+        try:
+            _last = _dt.fromisoformat(_lrow["last_xp"])
+            if _last.tzinfo is None: _last = _last.replace(tzinfo=_tz.utc)
+            if (_now - _last).total_seconds() < 60:
+                _can_xp = False
+        except: pass
+    if _can_xp:
+        _xp_gain = random.randint(3, 8)
+        if not _lrow:
+            db_exec("INSERT INTO levels (user_id,xp,level,last_xp) VALUES (?,?,1,?)",
+                    (uid, _xp_gain, _now.isoformat()))
+            _cur_xp, _cur_lvl = _xp_gain, 1
+        else:
+            db_exec("UPDATE levels SET xp=xp+?, last_xp=? WHERE user_id=?",
+                    (_xp_gain, _now.isoformat(), uid))
+            _cur_xp = (_lrow["xp"] or 0) + _xp_gain
+            _cur_lvl = _lrow["level"] or 1
+        # Формула: нужно (lvl * 100) XP для следующего уровня
+        _needed = _cur_lvl * 100
+        if _cur_xp >= _needed and _cur_lvl < 100:
+            _new_lvl = _cur_lvl + 1
+            db_exec("UPDATE levels SET level=?, xp=0 WHERE user_id=?", (_new_lvl, uid))
+            try:
+                await message.answer(
+                    f"🎉 {mn(uid, message.from_user.full_name)} достиг <b>{_new_lvl} уровня</b>! 🏆"
+                )
+            except: pass
 
     # multi-prefix команды (. ! - + и без префикса)
     parsed = parse_cmd(text)
@@ -575,6 +687,21 @@ async def handle_alias_cmd(message: Message, cmd: str, args: list) -> bool:
         "магазин": do_shop_cmd, "shop": do_shop_cmd,
         "инвентарь": do_inventory, "инв": do_inventory,
         "кейс": do_case, "case": do_case,
+        "уровень": lambda m, a: cmd_level(m),
+        "ур": lambda m, a: cmd_level(m),
+        "топуровней": lambda m, a: cmd_lvltop(m),
+        "профиль": lambda m, a: cmd_profile(m),
+        "проф": lambda m, a: cmd_profile(m),
+        "ник": lambda m, a: cmd_set_nick(m),
+        "девиз": lambda m, a: cmd_set_motto(m),
+        "мойпол": lambda m, a: cmd_set_gender(m),
+        "предложение": lambda m, a: cmd_propose(m),
+        "замуж": lambda m, a: cmd_propose(m),
+        "развод": lambda m, a: cmd_divorce2(m),
+        "брак": lambda m, a: cmd_my_marriage(m),
+        "мойбрак": lambda m, a: cmd_my_marriage(m),
+        "топбраков": lambda m, a: cmd_marriage_top(m),
+        "инвайты": lambda m, a: cmd_invites(m),
         "правила": do_rules, "rules": do_rules,
         "триггеры": do_triggers, "triggers": do_triggers,
         "пинг": do_ping, "ping": do_ping,
@@ -2141,7 +2268,7 @@ async def cb_help(call: CallbackQuery):
         "инвентарь • кейс • завод • топзавод\n"
         "жениться • семья • должности • чаты",
         reply_markup=kb_back()
-    )
+            )
 
 # ══════════════════════════════════════════════
 #  REPORT SYSTEM
@@ -2406,6 +2533,343 @@ async def update_member_counts():
             except:
                 pass
         await asyncio.sleep(600)
+
+
+# ══════════════════════════════════════════════
+#  УРОВНИ
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["уровень", "lvl", "level", "ур"]))
+async def cmd_level(message: Message):
+    uid = message.from_user.id
+    if message.reply_to_message:
+        uid = message.reply_to_message.from_user.id
+        name = message.reply_to_message.from_user.full_name
+    else:
+        name = message.from_user.full_name
+    row = db_one("SELECT xp, level FROM levels WHERE user_id=?", (uid,))
+    if not row:
+        return await message.answer(f"📊 {mn(uid, name)} ещё не писал(а) в чатах.")
+    lvl = row["level"]
+    xp = row["xp"]
+    needed = lvl * 100
+    bar_filled = int((xp / needed) * 10) if needed else 0
+    bar = "█" * bar_filled + "░" * (10 - bar_filled)
+    await message.answer(
+        f"📊 <b>Уровень {mn(uid, name)}</b>\n\n"
+        f"🏆 Уровень: <b>{lvl}/100</b>\n"
+        f"✨ XP: <b>{xp}/{needed}</b>\n"
+        f"[{bar}]"
+    )
+
+@router.message(Command(commands=["топуровней", "lvltop", "leveltop"]))
+async def cmd_lvltop(message: Message):
+    rows = db_all("SELECT user_id, level, xp FROM levels ORDER BY level DESC, xp DESC LIMIT 10", ())
+    if not rows:
+        return await message.answer("📊 Пока никто не набрал XP.")
+    medals = ["🥇","🥈","🥉"]
+    lines = []
+    for i, r in enumerate(rows):
+        s = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (r["user_id"],))
+        name = s["name"] if s else str(r["user_id"])
+        medal = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{medal} {mn(r['user_id'], name)} — <b>{r['level']} ур.</b> ({r['xp']} xp)")
+    await message.answer("🏆 <b>Топ уровней:</b>\n\n" + "\n".join(lines))
+
+# ══════════════════════════════════════════════
+#  ПРОФИЛЬ
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["профиль", "profile", "проф"]))
+async def cmd_profile(message: Message):
+    if message.reply_to_message:
+        uid = message.reply_to_message.from_user.id
+        name = message.reply_to_message.from_user.full_name
+        username = message.reply_to_message.from_user.username
+    else:
+        uid = message.from_user.id
+        name = message.from_user.full_name
+        username = message.from_user.username
+    p = db_one("SELECT * FROM profiles WHERE user_id=?", (uid,))
+    lvl_row = db_one("SELECT level, xp FROM levels WHERE user_id=?", (uid,))
+    eco = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))
+    marriage = db_one("SELECT user1,user2,date FROM marriages WHERE user1=? OR user2=?", (uid, uid))
+    warns_cnt = db_one("SELECT COUNT(*) as c FROM warns WHERE user_id=?", (uid,))
+
+    nick = (p["nickname"] if p and p["nickname"] else "")
+    bio = (p["bio"] if p and p["bio"] else "")
+    motto = (p["motto"] if p and p["motto"] else "")
+    gender_map = {"м": "👨 Мужской", "ж": "👩 Женский", "др": "🌈 Другой"}
+    gender = gender_map.get(p["gender"] if p else "", "")
+
+    display = f"{nick} | {name}" if nick else name
+    lines = [f"👤 <b>{display}</b>"]
+    if username:
+        lines.append(f"🔗 @{username}")
+    if gender:
+        lines.append(f"⚧ {gender}")
+    if motto:
+        lines.append(f"💬 <i>{motto}</i>")
+    lines.append("")
+    if lvl_row:
+        lines.append(f"🏆 Уровень: <b>{lvl_row['level']}</b> ({lvl_row['xp']} xp)")
+    if eco:
+        lines.append(f"💎 Баланс: <b>{eco['balance']}</b>")
+    if warns_cnt and warns_cnt["c"]:
+        lines.append(f"⚠️ Варнов: <b>{warns_cnt['c']}</b>")
+    if marriage:
+        partner = marriage["user2"] if marriage["user1"] == uid else marriage["user1"]
+        ps = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (partner,))
+        pname = ps["name"] if ps else str(partner)
+        lines.append(f"💑 В браке с {mn(partner, pname)}")
+    if bio:
+        lines.append(f"\n📝 {bio}")
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = None
+    if uid == message.from_user.id:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить профиль", callback_data="edit_profile")]
+        ])
+    await message.answer("\n".join(lines), reply_markup=kb)
+
+@router.callback_query(F.data == "edit_profile")
+async def cb_edit_profile(call: CallbackQuery):
+    await call.message.edit_text(
+        "✏️ <b>Редактирование профиля</b>\n\n"
+        "Используй команды:\n"
+        "• <code>ник {текст}</code> — установить ник\n"
+        "• <code>обо мне {текст}</code> — описание\n"
+        "• <code>девиз {текст}</code> — девиз\n"
+        "• <code>мой пол м/ж/др</code> — пол",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+        ])
+    )
+
+@router.message(Command(commands=["ник", "nick", "nickname"]))
+async def cmd_set_nick(message: Message):
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await message.answer("❌ Укажи ник: <code>/ник Имя</code>")
+    nick = parts[1][:30]
+    db_exec("INSERT INTO profiles (user_id,nickname) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET nickname=?",
+            (uid, nick, nick))
+    await message.answer(f"✅ Ник установлен: <b>{nick}</b>")
+
+@router.message(Command(commands=["обомне", "bio", "описание"]))
+async def cmd_set_bio(message: Message):
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await message.answer("❌ Укажи описание: <code>/обомне текст</code>")
+    bio = parts[1][:200]
+    db_exec("INSERT INTO profiles (user_id,bio) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET bio=?",
+            (uid, bio, bio))
+    await message.answer("✅ Описание обновлено.")
+
+@router.message(Command(commands=["девиз", "motto"]))
+async def cmd_set_motto(message: Message):
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await message.answer("❌ Укажи девиз: <code>/девиз текст</code>")
+    motto = parts[1][:100]
+    db_exec("INSERT INTO profiles (user_id,motto) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET motto=?",
+            (uid, motto, motto))
+    await message.answer(f"✅ Девиз: <i>{motto}</i>")
+
+@router.message(Command(commands=["мойпол", "gender"]))
+async def cmd_set_gender(message: Message):
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) < 2 or parts[1].lower() not in ("м", "ж", "др"):
+        return await message.answer("❌ Укажи пол: <code>/мойпол м</code> или <code>ж</code> или <code>др</code>")
+    g = parts[1].lower()
+    db_exec("INSERT INTO profiles (user_id,gender) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET gender=?",
+            (uid, g, g))
+    await message.answer("✅ Пол обновлён.")
+
+# ══════════════════════════════════════════════
+#  БРАКИ (полноценные)
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["предложение", "propose", "замуж", "жениться2"]))
+async def cmd_propose(message: Message):
+    if not message.reply_to_message:
+        return await message.answer("⚠️ Ответь на сообщение того кому хочешь сделать предложение.")
+    u1 = message.from_user.id
+    u2 = message.reply_to_message.from_user.id
+    if u1 == u2:
+        return await message.answer("❌ Нельзя жениться на себе.")
+    if db_one("SELECT 1 FROM marriages WHERE user1=? OR user2=?", (u1, u1)):
+        return await message.answer("❌ Ты уже в браке. Сначала разведись.")
+    if db_one("SELECT 1 FROM marriages WHERE user1=? OR user2=?", (u2, u2)):
+        return await message.answer("❌ Этот человек уже в браке.")
+    if db_one("SELECT 1 FROM marriage_proposals WHERE from_id=? AND to_id=?", (u1, u2)):
+        return await message.answer("❌ Ты уже делал(а) предложение этому человеку.")
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💍 Принять", callback_data=f"marry_yes_{u1}_{u2}"),
+            InlineKeyboardButton(text="💔 Отказать", callback_data=f"marry_no_{u1}_{u2}")
+        ]
+    ])
+    t = message.reply_to_message.from_user
+    sent = await message.answer(
+        f"💍 {mn(u1, message.from_user.full_name)} делает предложение {mn(u2, t.full_name)}!\n\n"
+        f"💬 <i>{mn(u2, t.full_name)}, принимаешь?</i>",
+        reply_markup=kb
+    )
+    db_exec("INSERT OR REPLACE INTO marriage_proposals (from_id,to_id,chat_id,msg_id) VALUES (?,?,?,?)",
+            (u1, u2, message.chat.id, sent.message_id))
+
+@router.callback_query(F.data.startswith("marry_yes_"))
+async def cb_marry_yes(call: CallbackQuery):
+    parts = call.data.split("_")
+    u1, u2 = int(parts[2]), int(parts[3])
+    if call.from_user.id != u2:
+        return await call.answer("❌ Это не твоё предложение.", show_alert=True)
+    if db_one("SELECT 1 FROM marriages WHERE user1=? OR user2=?", (u1, u1)):
+        await call.message.edit_text("❌ Этот человек уже в браке.")
+        return
+    if db_one("SELECT 1 FROM marriages WHERE user1=? OR user2=?", (u2, u2)):
+        await call.message.edit_text("❌ Ты уже в браке.")
+        return
+    db_exec("INSERT OR IGNORE INTO marriages (user1,user2,chat_id) VALUES (?,?,?)",
+            (min(u1,u2), max(u1,u2), call.message.chat.id))
+    db_exec("DELETE FROM marriage_proposals WHERE from_id=? AND to_id=?", (u1, u2))
+    s1 = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (u1,))
+    s2 = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (u2,))
+    n1 = s1["name"] if s1 else str(u1)
+    n2 = s2["name"] if s2 else str(u2)
+    await call.message.edit_text(
+        f"💒 <b>Свадьба!</b>\n\n"
+        f"💑 {mn(u1, n1)} и {mn(u2, n2)} теперь в браке! 🎉\n"
+        f"❤️ Поздравляем молодожёнов!"
+    )
+
+@router.callback_query(F.data.startswith("marry_no_"))
+async def cb_marry_no(call: CallbackQuery):
+    parts = call.data.split("_")
+    u1, u2 = int(parts[2]), int(parts[3])
+    if call.from_user.id != u2:
+        return await call.answer("❌ Это не твоё предложение.", show_alert=True)
+    db_exec("DELETE FROM marriage_proposals WHERE from_id=? AND to_id=?", (u1, u2))
+    s1 = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (u1,))
+    n1 = s1["name"] if s1 else str(u1)
+    await call.message.edit_text(f"💔 {mn(u2, call.from_user.full_name)} отказал(а) {mn(u1, n1)}.")
+
+@router.message(Command(commands=["развод", "divorce2", "расстаться"]))
+async def cmd_divorce2(message: Message):
+    uid = message.from_user.id
+    row = db_one("SELECT user1,user2 FROM marriages WHERE user1=? OR user2=?", (uid, uid))
+    if not row:
+        return await message.answer("❌ Ты не в браке.")
+    partner = row["user2"] if row["user1"] == uid else row["user1"]
+    db_exec("DELETE FROM marriages WHERE user1=? OR user2=?", (uid, uid))
+    ps = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (partner,))
+    pname = ps["name"] if ps else str(partner)
+    await message.answer(f"💔 {mn(uid, message.from_user.full_name)} и {mn(partner, pname)} развелись.")
+
+@router.message(Command(commands=["мойбрак", "mymarriage", "брак"]))
+async def cmd_my_marriage(message: Message):
+    uid = message.from_user.id
+    row = db_one("SELECT user1,user2,date FROM marriages WHERE user1=? OR user2=?", (uid, uid))
+    if not row:
+        return await message.answer("💔 Ты не в браке.")
+    partner = row["user2"] if row["user1"] == uid else row["user1"]
+    ps = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (partner,))
+    pname = ps["name"] if ps else str(partner)
+    await message.answer(
+        f"💑 <b>Брак</b>\n\n"
+        f"❤️ {mn(uid, message.from_user.full_name)} + {mn(partner, pname)}\n"
+        f"📅 С {row['date'][:10]}"
+    )
+
+@router.message(Command(commands=["топбраков", "marriagetop"]))
+async def cmd_marriage_top(message: Message):
+    rows = db_all("SELECT user1,user2,date FROM marriages ORDER BY date ASC LIMIT 10", ())
+    if not rows:
+        return await message.answer("💔 Браков пока нет.")
+    lines = []
+    for i, r in enumerate(rows):
+        s1 = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (r["user1"],))
+        s2 = db_one("SELECT name FROM stats WHERE user_id=? LIMIT 1", (r["user2"],))
+        n1 = s1["name"] if s1 else str(r["user1"])
+        n2 = s2["name"] if s2 else str(r["user2"])
+        lines.append(f"{i+1}. 💑 {mn(r['user1'],n1)} + {mn(r['user2'],n2)}")
+    await message.answer("💒 <b>Браки:</b>\n\n" + "\n".join(lines))
+
+# ══════════════════════════════════════════════
+#  ИНВАЙТЫ
+# ══════════════════════════════════════════════
+@router.message(Command(commands=["инвайты", "invites"]))
+async def cmd_invites(message: Message):
+    if not is_group(message):
+        return
+    if not await check_admin(bot, message.chat.id, message.from_user.id):
+        return await message.answer("❌ Только для администраторов.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        limit = get_chat(message.chat.id).get("invite_limit", 30)
+        return await message.answer(f"👥 Текущий лимит инвайтов: <b>{limit}</b>\n"
+                                    f"Для изменения: <code>инвайты 50</code> или <code>инвайты 0</code> для отключения.")
+    try:
+        n = int(parts[1])
+    except:
+        return await message.answer("❌ Укажи число: <code>инвайты 30</code>")
+    set_chat(message.chat.id, "invite_limit", n)
+    if n == 0:
+        await message.answer("✅ Лимит инвайтов отключён.")
+    else:
+        await message.answer(f"✅ Лимит инвайтов установлен: <b>{n}</b>")
+
+@router.chat_member()
+async def on_member_invite_check(event: ChatMemberUpdated):
+    old = event.old_chat_member.status
+    new = event.new_chat_member.status
+    joined = (old in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED) and new == ChatMemberStatus.MEMBER)
+    if not joined:
+        return
+    if not event.invite_link:
+        return
+    inviter_id = getattr(event.invite_link, "creator", None)
+    if not inviter_id:
+        return
+    inviter_id = inviter_id.id if hasattr(inviter_id, "id") else None
+    if not inviter_id:
+        return
+    cid = event.chat.id
+    limit = get_chat(cid).get("invite_limit", 30)
+    if limit == 0:
+        return
+    from datetime import datetime as _dt2, timezone as _tz2
+    now_str = _dt2.now(_tz2.utc).isoformat()
+    row = db_one("SELECT invited, window_start FROM invite_tracker WHERE chat_id=? AND user_id=?", (cid, inviter_id))
+    if row:
+        try:
+            ws = _dt2.fromisoformat(row["window_start"])
+            if ws.tzinfo is None: ws = ws.replace(tzinfo=_tz2.utc)
+            if (_dt2.now(_tz2.utc) - ws).total_seconds() > 3600:
+                db_exec("UPDATE invite_tracker SET invited=1, window_start=? WHERE chat_id=? AND user_id=?",
+                        (now_str, cid, inviter_id))
+                return
+        except: pass
+        new_count = (row["invited"] or 0) + 1
+        if new_count >= limit:
+            db_exec("DELETE FROM invite_tracker WHERE chat_id=? AND user_id=?", (cid, inviter_id))
+            try:
+                await bot.ban_chat_member(cid, inviter_id)
+                await bot.unban_chat_member(cid, inviter_id)
+                await bot.send_message(cid,
+                    f"⚠️ Пользователь превысил лимит инвайтов ({limit}) и был исключён из чата.")
+            except: pass
+        else:
+            db_exec("UPDATE invite_tracker SET invited=? WHERE chat_id=? AND user_id=?",
+                    (new_count, cid, inviter_id))
+    else:
+        db_exec("INSERT INTO invite_tracker (chat_id,user_id,invited,window_start) VALUES (?,?,1,?)",
+                (cid, inviter_id, now_str))
 
 # ══════════════════════════════════════════════
 #  ADMIN WARNS (аварн)
