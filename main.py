@@ -129,6 +129,19 @@ CREATE TABLE IF NOT EXISTS factories (
 """)
 conn.commit()
 
+cur.executescript("""
+CREATE TABLE IF NOT EXISTS case_cooldowns (
+    user_id INTEGER PRIMARY KEY,
+    last_case TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS active_items (
+    user_id INTEGER PRIMARY KEY,
+    vip_until TEXT DEFAULT '',
+    amulet_until TEXT DEFAULT ''
+);
+""")
+conn.commit()
+
 cur.execute("SELECT COUNT(*) FROM shop")
 if cur.fetchone()[0] == 0:
     cur.executemany("INSERT INTO shop (name,price,description) VALUES (?,?,?)", [
@@ -726,17 +739,75 @@ async def do_shop_cmd(message: Message, args=None):
     lines = [f"<b>{r['id']}.</b> {r['name']} — <b>{r['price']} 💎</b>\n<i>{r['description']}</i>" for r in rows]
     await message.answer("🛒 <b>Магазин:</b>\n\n" + "\n\n".join(lines), reply_markup=kb_shop())
 
+def kb_inventory(rows):
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = []
+    activatable = {"🎭 VIP-статус": "use_vip", "🍀 Амулет": "use_amulet", "💎 Кристалл": "use_crystal"}
+    for r in rows:
+        if r["item"] in activatable:
+            buttons.append([InlineKeyboardButton(
+                text=f"▶️ Активировать {r['item']} (x{r['cnt']})",
+                callback_data=activatable[r["item"]]
+            )])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 async def do_inventory(message: Message, args=None):
     uid = message.from_user.id
     rows = db_all("SELECT item,COUNT(*) as cnt FROM inventory WHERE user_id=? GROUP BY item", (uid,))
+    # Активные эффекты
+    active = db_one("SELECT vip_until, amulet_until FROM active_items WHERE user_id=?", (uid,))
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    status_lines = []
+    if active:
+        if active["vip_until"]:
+            try:
+                vip_dt = datetime.fromisoformat(active["vip_until"])
+                if vip_dt.tzinfo is None: vip_dt = vip_dt.replace(tzinfo=timezone.utc)
+                if vip_dt > now:
+                    left = int((vip_dt - now).total_seconds())
+                    h, m = divmod(left // 60, 60)
+                    status_lines.append(f"🎭 VIP активен ещё {h}ч {m}м")
+            except: pass
+        if active["amulet_until"]:
+            try:
+                am_dt = datetime.fromisoformat(active["amulet_until"])
+                if am_dt.tzinfo is None: am_dt = am_dt.replace(tzinfo=timezone.utc)
+                if am_dt > now:
+                    left = int((am_dt - now).total_seconds())
+                    h, m = divmod(left // 60, 60)
+                    status_lines.append(f"🍀 Амулет активен ещё {h}ч {m}м")
+            except: pass
     if not rows:
-        return await message.answer("🎒 Инвентарь пуст.", reply_markup=kb_back())
-    await message.answer("🎒 <b>Инвентарь:</b>\n" + "\n".join(f"• {r['item']} x{r['cnt']}" for r in rows),
-                         reply_markup=kb_back())
+        text = "🎒 Инвентарь пуст."
+        if status_lines:
+            text += "\n\n✨ <b>Активные эффекты:</b>\n" + "\n".join(status_lines)
+        return await message.answer(text, reply_markup=kb_back())
+    lines = [f"• {r['item']} x{r['cnt']}" for r in rows]
+    text = "🎒 <b>Инвентарь:</b>\n" + "\n".join(lines)
+    if status_lines:
+        text += "\n\n✨ <b>Активные эффекты:</b>\n" + "\n".join(status_lines)
+    await message.answer(text, reply_markup=kb_inventory(rows))
+
+CASE_CD = 4 * 3600  # 4 часа
 
 async def do_case(message: Message, args=None):
     uid = message.from_user.id
     ensure_eco(uid)
+    # Проверка КД
+    row = db_one("SELECT last_case FROM case_cooldowns WHERE user_id=?", (uid,))
+    if row and row["last_case"]:
+        from datetime import datetime, timezone
+        last = datetime.fromisoformat(row["last_case"])
+        now = datetime.now(timezone.utc)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        diff = (now - last).total_seconds()
+        if diff < CASE_CD:
+            left = int(CASE_CD - diff)
+            h, m = divmod(left // 60, 60)
+            return await message.answer(f"⏳ Кейс на КД! Осталось: <b>{h}ч {m}м</b>")
     cost = 50
     bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
     if bal < cost:
@@ -753,13 +824,16 @@ async def do_case(message: Message, args=None):
         if roll <= cum:
             prize = name; break
     db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).isoformat()
+    db_exec("INSERT OR REPLACE INTO case_cooldowns (user_id,last_case) VALUES (?,?)", (uid, now_str))
     if "монет" in prize:
         coins = int(prize.split()[1])
         db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (coins, uid))
     else:
         db_exec("INSERT INTO inventory (user_id,item) VALUES (?,?)", (uid, prize))
     new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
-    await message.answer(f"🎲 Выпало: <b>{prize}</b>!\n💰 Баланс: <b>{new_bal} 💎</b>")
+    await message.answer(f"🎲 Выпало: <b>{prize}</b>!\n💰 Баланс: <b>{new_bal} 💎</b>\n⏳ Следующий кейс через 4 часа")
 
 async def do_rules(message: Message, args=None):
     if not is_group(message):
@@ -1967,6 +2041,18 @@ async def cb_buy(call: CallbackQuery):
 async def cb_case(call: CallbackQuery):
     uid = call.from_user.id
     ensure_eco(uid)
+    from datetime import datetime, timezone
+    row = db_one("SELECT last_case FROM case_cooldowns WHERE user_id=?", (uid,))
+    if row and row["last_case"]:
+        last = datetime.fromisoformat(row["last_case"])
+        now = datetime.now(timezone.utc)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        diff = (now - last).total_seconds()
+        if diff < CASE_CD:
+            left = int(CASE_CD - diff)
+            h, m = divmod(left // 60, 60)
+            return await call.answer(f"⏳ КД! Осталось {h}ч {m}м", show_alert=True)
     cost = 50
     bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
     if bal < cost:
@@ -1983,13 +2069,54 @@ async def cb_case(call: CallbackQuery):
         if roll <= cum:
             prize = name; break
     db_exec("UPDATE economy SET balance=balance-? WHERE user_id=?", (cost, uid))
+    now_str = datetime.now(timezone.utc).isoformat()
+    db_exec("INSERT OR REPLACE INTO case_cooldowns (user_id,last_case) VALUES (?,?)", (uid, now_str))
     if "монет" in prize:
         coins = int(prize.split()[1])
         db_exec("UPDATE economy SET balance=balance+? WHERE user_id=?", (coins, uid))
     else:
         db_exec("INSERT INTO inventory (user_id,item) VALUES (?,?)", (uid, prize))
     new_bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
-    await call.answer(f"🎲 Выпало: {prize}! Баланс: {new_bal} 💎", show_alert=True)
+    await call.answer(f"🎲 Выпало: {prize}! Баланс: {new_bal} 💎\n⏳ Следующий через 4ч", show_alert=True)
+
+@router.callback_query(F.data == "use_vip")
+async def cb_use_vip(call: CallbackQuery):
+    uid = call.from_user.id
+    row = db_one("SELECT id FROM inventory WHERE user_id=? AND item=?", (uid, "🎭 VIP-статус"))
+    if not row:
+        return await call.answer("❌ VIP-статуса нет в инвентаре.", show_alert=True)
+    db_exec("DELETE FROM inventory WHERE id=?", (row["id"],))
+    from datetime import datetime, timezone, timedelta
+    until = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    db_exec("INSERT OR REPLACE INTO active_items (user_id,vip_until) VALUES (?,?)", (uid, until))
+    await call.answer("🎭 VIP-статус активирован на 24 часа!", show_alert=True)
+    await call.message.delete()
+
+@router.callback_query(F.data == "use_amulet")
+async def cb_use_amulet(call: CallbackQuery):
+    uid = call.from_user.id
+    row = db_one("SELECT id FROM inventory WHERE user_id=? AND item=?", (uid, "🍀 Амулет"))
+    if not row:
+        return await call.answer("❌ Амулета нет в инвентаре.", show_alert=True)
+    db_exec("DELETE FROM inventory WHERE id=?", (row["id"],))
+    from datetime import datetime, timezone, timedelta
+    until = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()
+    db_exec("""INSERT INTO active_items (user_id,amulet_until) VALUES (?,?)
+               ON CONFLICT(user_id) DO UPDATE SET amulet_until=excluded.amulet_until""", (uid, until))
+    await call.answer("🍀 Амулет активирован на 12 часов! Удача с тобой.", show_alert=True)
+    await call.message.delete()
+
+@router.callback_query(F.data == "use_crystal")
+async def cb_use_crystal(call: CallbackQuery):
+    uid = call.from_user.id
+    row = db_one("SELECT id FROM inventory WHERE user_id=? AND item=?", (uid, "💎 Кристалл"))
+    if not row:
+        return await call.answer("❌ Кристалла нет в инвентаре.", show_alert=True)
+    db_exec("DELETE FROM inventory WHERE id=?", (row["id"],))
+    db_exec("UPDATE economy SET balance=balance+100 WHERE user_id=?", (uid,))
+    bal = db_one("SELECT balance FROM economy WHERE user_id=?", (uid,))["balance"]
+    await call.answer(f"💎 Кристалл использован! +100 💎\nБаланс: {bal} 💎", show_alert=True)
+    await call.message.delete()
 
 @router.callback_query(F.data == "top")
 async def cb_top(call: CallbackQuery):
@@ -2344,21 +2471,48 @@ def add_mod_log(chat_id, mod_id, mod_name, action, target, reason=""):
             (chat_id, mod_id, mod_name, action, target, reason))
 
 # ── /аварн ────────────────────────────────────
+async def resolve_awarn_target(message: Message):
+    """Получает цель аварна: реплай, @юзер или айди"""
+    parts = message.text.split()
+    if message.reply_to_message:
+        return message.reply_to_message.from_user, " ".join(parts[1:]) or "Без причины"
+    if len(parts) >= 2:
+        target_str = parts[1]
+        reason = " ".join(parts[2:]) or "Без причины"
+        # По айди
+        if target_str.lstrip("-").isdigit():
+            tid = int(target_str)
+            try:
+                member = await bot.get_chat_member(message.chat.id, tid)
+                return member.user, reason
+            except:
+                return None, reason
+        # По @юзернейму
+        if target_str.startswith("@"):
+            username = target_str[1:]
+            row = db_one("SELECT user_id, name FROM stats WHERE name LIKE ?", (f"%{username}%",))
+            if row:
+                try:
+                    member = await bot.get_chat_member(message.chat.id, row["user_id"])
+                    return member.user, reason
+                except:
+                    pass
+    return None, "Без причины"
+
 @router.message(Command(commands=["аварн", "awarn"]))
 async def cmd_awarn(message: Message):
     uid = message.from_user.id
     my_rank = get_bot_rank(uid)
     if my_rank > 5:
         return await message.answer("❌ Только ПВ и выше.")
-    if not message.reply_to_message:
-        return await message.answer("⚠️ Ответь на сообщение.")
-    t = message.reply_to_message.from_user
+    t, reason = await resolve_awarn_target(message)
+    if not t:
+        return await message.answer("⚠️ Укажи цель: ответь на сообщение, @юзернейм или айди\n📌 <code>/аварн 123456789 причина</code>")
     if t.id == OWNER_ID:
         return await message.answer("❌ Нельзя варнить владельца.")
     their_rank = get_bot_rank(t.id)
     if not can_appoint(my_rank, their_rank):
         return await message.answer("❌ Нельзя варнить человека с должностью выше или равной твоей.")
-    reason = " ".join(message.text.split()[1:]) or "Без причины"
     db_exec("INSERT INTO admin_warns (user_id,reason,from_id) VALUES (?,?,?)", (t.id, reason, uid))
     cnt = db_one("SELECT COUNT(*) as c FROM admin_warns WHERE user_id=?", (t.id,))["c"]
     await message.answer(
@@ -2384,9 +2538,9 @@ async def cmd_clearawarn(message: Message):
     my_rank = get_bot_rank(uid)
     if my_rank > 5:
         return await message.answer("❌ Только ПВ и выше.")
-    if not message.reply_to_message:
-        return await message.answer("⚠️ Ответь на сообщение.")
-    t = message.reply_to_message.from_user
+    t, _ = await resolve_awarn_target(message)
+    if not t:
+        return await message.answer("⚠️ Укажи цель: ответь на сообщение, @юзернейм или айди\n📌 <code>/снятьаварн 123456789</code>")
     db_exec("DELETE FROM admin_warns WHERE user_id=?", (t.id,))
     await message.answer(f"✅ Аварны {mn(t.id, t.full_name)} сняты.")
 
